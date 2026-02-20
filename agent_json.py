@@ -22,7 +22,7 @@ def run(task: str, strict: bool = False, verify: bool = False) -> dict:
     if strict:
         strict_rules = """
 Strict rules:
-- Do NOT guess facts (numbers, ingredients, dates, mg caffeine, calories).
+- Do NOT guess facts (numbers, ingredients, dates, mg caffeine, calories, grams sugar).
 - If unsure, say "unknown/varies by variant" rather than inventing.
 - Prefer general, correct statements over specific, uncertain ones.
 """
@@ -35,10 +35,20 @@ Strict rules:
   "how_to_verify": ["string","string","string"]
 }"""
         verify_rules = """
-Verify rules:
-- claims_to_verify: list up to 3 factual claims in your bullets that could be wrong or vary by region/variant.
-- how_to_verify: for each claim, give a concrete way to check (e.g., "nutrition label", "brand website nutrition page", "USDA/FDA database", "photo of can label").
-- If your answer is fully general and not fact-specific, you can put "none" as the single item in claims_to_verify and how_to_verify.
+Verify rules (STRICT):
+- You are not actually verifying anything. You are creating a checklist of what must be checked.
+- claims_to_verify MUST include the highest-risk factual claims from your bullets.
+- ALWAYS include (if present in bullets):
+  1) Every numeric claim (calories, mg caffeine, grams sugar, dates, percentages).
+  2) Every ingredient/sweetener/preservative claim (aspartame, HFCS, etc.).
+  3) Every "contains/does not contain" claim (sugar-free, caffeine-free, etc.).
+- If there are more than 3 such claims, choose the 3 most important for the user’s decision.
+- claims_to_verify items must be short, specific sentences copied from (or directly matching) your bullets.
+- how_to_verify must give a concrete method for each claim, in the same order, e.g.:
+  - "Check the nutrition label on the can/bottle"
+  - "Check Coca-Cola product nutrition page for US"
+  - "Compare ingredient lists on official packaging photos"
+- If your bullets contain none of the above risky claims, set claims_to_verify=["none"] and how_to_verify=["none"].
 """
     else:
         schema = """{
@@ -74,18 +84,37 @@ Rules:
     data["bullets"] = _ensure_five_nonempty(data.get("bullets", []))
 
     if verify:
-        # Ensure fields exist and are lists
         claims = data.get("claims_to_verify", [])
         how = data.get("how_to_verify", [])
+
         if not isinstance(claims, list):
             claims = [str(claims)]
         if not isinstance(how, list):
             how = [str(how)]
-        data["claims_to_verify"] = [str(x).strip() for x in claims if str(x).strip()][:3] or ["none"]
-        data["how_to_verify"] = [str(x).strip() for x in how if str(x).strip()][:3] or ["none"]
+
+        claims = [str(x).strip() for x in claims if str(x).strip()]
+        how = [str(x).strip() for x in how if str(x).strip()]
+
+        # If model forgot these fields, default to "none"
+        if not claims:
+            claims = ["none"]
+        if not how:
+            how = ["none"]
+
+        data["claims_to_verify"] = claims[:3]
+        data["how_to_verify"] = how[:3]
+
+        # If claims != how length, pad how_to_verify
+        while len(data["how_to_verify"]) < len(data["claims_to_verify"]):
+            data["how_to_verify"].append("Check official packaging label or brand nutrition page.")
+        data["how_to_verify"] = data["how_to_verify"][:len(data["claims_to_verify"])]
 
     return data
 
 if __name__ == "__main__":
-    out = run("Compare Diet Coke vs Fanta Orange (regular, US). Mention sugar, calories, caffeine, and flavor.", strict=True, verify=True)
+    out = run(
+        "Compare Diet Coke vs Fanta Orange (regular, US). Mention sugar, calories, caffeine, and flavor.",
+        strict=True,
+        verify=True,
+    )
     print(json.dumps(out, indent=2))
