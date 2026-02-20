@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import subprocess
 from datetime import datetime
 
 from ollama_client import OllamaNotRunning, generate
@@ -22,8 +23,56 @@ def _save_json(data: dict, out: str = "") -> str:
     return path
 
 
+def _find_last_saved_path(limit: int = 5000) -> str:
+    """
+    Find the most recent run log entry that has a non-empty 'saved_to' path.
+    """
+    events = read_last(limit)
+    for e in reversed(events):
+        p = (e.get("saved_to") or "").strip()
+        if p:
+            return p
+    return ""
+
+
+def _print_json_file(path: str) -> None:
+    if not os.path.exists(path):
+        print(f"Last output file not found: {path}")
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        print(json.dumps(data, indent=2))
+    except json.JSONDecodeError:
+        # If it's not valid JSON for some reason, print raw
+        with open(path, "r", encoding="utf-8") as f:
+            print(f.read())
+
+
+def _open_file(path: str) -> None:
+    """
+    Try opening in VS Code first, otherwise fallback to macOS 'open'.
+    """
+    if not os.path.exists(path):
+        print(f"Last output file not found: {path}")
+        return
+
+    # Try VS Code CLI
+    try:
+        subprocess.run(["code", path], check=False)
+        return
+    except Exception:
+        pass
+
+    # Fallback: macOS open
+    try:
+        subprocess.run(["open", path], check=False)
+    except Exception as e:
+        print(f"Could not open file: {path}\n{e}")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Local agent CLI (chat + json + memory + router).")
+    parser = argparse.ArgumentParser(description="Local agent CLI (chat + json + memory + router) with logging.")
     parser.add_argument("task", nargs="?", default="", help="Task to run (wrap in quotes).")
 
     # Modes
@@ -51,7 +100,23 @@ def main():
     parser.add_argument("--log-limit", type=int, default=20, help="How many runs to show with --show-log.")
     parser.add_argument("--search-log", default="", help="Search run log by keyword.")
 
+    # Last output helpers
+    parser.add_argument("--last-output", action="store_true", help="Print the most recently saved JSON output and exit.")
+    parser.add_argument("--open-last", action="store_true", help="Open the most recently saved JSON output and exit.")
+
     args = parser.parse_args()
+
+    # LAST OUTPUT: print or open and exit
+    if args.last_output or args.open_last:
+        last_path = _find_last_saved_path()
+        if not last_path:
+            print("No saved outputs found in run log yet. Run a command with --save first.")
+            return
+        if args.open_last:
+            _open_file(last_path)
+        else:
+            _print_json_file(last_path)
+        return
 
     # Show log and exit
     if args.show_log:
@@ -93,7 +158,7 @@ def main():
         return
 
     if not args.task:
-        print("Provide a task, or use --show-memory / --add-memory / --show-log.")
+        print("Provide a task, or use --show-memory / --add-memory / --show-log / --last-output.")
         return
 
     # Build memory context if requested
