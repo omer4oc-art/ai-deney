@@ -11,6 +11,38 @@ def _extract_json(text: str) -> str:
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
     return m.group(0).strip() if m else ""
 
+def _split_bullet(b: str):
+    # Split without adding new facts: first try semicolons, then commas
+    parts = [p.strip() for p in b.split(";") if p.strip()]
+    if len(parts) >= 2:
+        return parts
+    parts = [p.strip() for p in b.split(",") if p.strip()]
+    if len(parts) >= 2:
+        return parts
+    return [b.strip()]
+
+def _ensure_five_nonempty(bullets):
+    bullets = [b.strip() for b in bullets if isinstance(b, str) and b.strip()]
+
+    # If fewer than 5, split existing bullets into smaller ones
+    while len(bullets) < 5 and bullets:
+        i = max(range(len(bullets)), key=lambda idx: len(bullets[idx]))
+        longest = bullets.pop(i)
+        pieces = _split_bullet(longest)
+        bullets.insert(i, pieces[0])
+        for extra in pieces[1:]:
+            bullets.append(extra)
+
+        # If splitting didn't increase count, stop to avoid looping
+        if len(pieces) == 1:
+            break
+
+    # If still fewer than 5, pad with a neutral, non-invented note
+    while len(bullets) < 5:
+        bullets.append("Memory context did not include additional details.")
+
+    return bullets[:5]
+
 def run(task: str, context: str = "") -> dict:
     prompt = f"""{SYSTEM}
 
@@ -37,16 +69,18 @@ Return JSON with this exact schema:
     text = generate(prompt, stream=False).strip()
     if not text:
         raise RuntimeError("Model returned empty output. Is `ollama serve` running?")
+
     json_text = _extract_json(text)
     if not json_text:
+        print("RAW MODEL OUTPUT (not JSON):\n", text)
         raise RuntimeError("Could not find JSON in model output.")
+
     data = json.loads(json_text)
 
-    # Hard-enforce exactly 5 bullets
-    bullets = data.get("bullets", [])
-    bullets = bullets[:5] + [""] * (5 - len(bullets))
-    data["bullets"] = bullets
-    # Hard-enforce memory_to_save default
-    if "memory_to_save" not in data or data["memory_to_save"] is None:
+    # Enforce exactly 5 meaningful bullets without inventing new facts
+    data["bullets"] = _ensure_five_nonempty(data.get("bullets", []))
+
+    # Enforce memory_to_save default
+    if ("memory_to_save" not in data) or (data["memory_to_save"] is None):
         data["memory_to_save"] = ""
     return data
