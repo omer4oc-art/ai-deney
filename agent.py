@@ -60,7 +60,7 @@ def _open_file(path: str) -> None:
         print(f"File not found: {path}")
         return
 
-    # Try VS Code CLI
+    # Try VS Code CLI first
     try:
         subprocess.run(["code", path], check=False)
         return
@@ -74,17 +74,27 @@ def _open_file(path: str) -> None:
         print(f"Could not open file: {path}\n{e}")
 
 
+def _call_json_agent(task: str, strict: bool, verify: bool, bullets_n: int | None) -> dict:
+    """
+    Calls agent_json.run() with bullets_n if supported.
+    If your agent_json.py hasn't been updated yet, this falls back gracefully.
+    """
+    try:
+        return run_json_agent(task, strict=strict, verify=verify, bullets_n=bullets_n)
+    except TypeError:
+        # Older agent_json.run signature: run(task, strict=False, verify=False)
+        return run_json_agent(task, strict=strict, verify=verify)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Local agent CLI (chat + json + memory + router) with logging.")
+    parser = argparse.ArgumentParser(
+        description="Local agent CLI (chat + json + memory + router) with logging + file tools."
+    )
     parser.add_argument("task", nargs="?", default="", help="Task to run (wrap in quotes).")
 
     # Modes
     parser.add_argument("--chat", action="store_true", help="Plain text response (no JSON).")
-    parser.add_argument(
-        "--use-memory",
-        action="store_true",
-        help="Ground answer strictly in saved memory."
-    )
+    parser.add_argument("--use-memory", action="store_true", help="Ground answer strictly in saved memory.")
     parser.add_argument(
         "--router",
         action="store_true",
@@ -92,16 +102,11 @@ def main():
     )
 
     # Quality controls
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Do not guess facts; say unknown/varies when unsure."
-    )
-    parser.add_argument(
-        "--verify",
-        action="store_true",
-        help="Add claims_to_verify + how_to_verify fields (self-audit)."
-    )
+    parser.add_argument("--strict", action="store_true", help="Do not guess facts; say unknown/varies when unsure.")
+    parser.add_argument("--verify", action="store_true", help="Add claims_to_verify + how_to_verify fields (self-audit).")
+
+    # NEW: variable bullets by default; force with --bullets N
+    parser.add_argument("--bullets", type=int, default=0, help="Force number of bullets (0 = model decides).")
 
     # Memory controls
     parser.add_argument("--memory-query", default="", help="Filter memory context by keyword (e.g., week1).")
@@ -123,36 +128,65 @@ def main():
     # Last output helpers
     parser.add_argument("--last-output", action="store_true", help="Print the most recently saved JSON output and exit.")
     parser.add_argument("--open-last", action="store_true", help="Open the most recently saved JSON output and exit.")
-
-    # Open last saved output matching a keyword
     parser.add_argument("--open-log", default="", help="Open the most recent saved output matching a keyword (task/title/mode).")
 
     # File tools
-    parser.add_argument("--from-file", default="", help="Read a file (relative to project) and include it in the task context.")
+    parser.add_argument("--from-file", default="", help="Read a file (relative to project) and include it in the task.")
     parser.add_argument("--to-file", default="", help="Write the output to a file (relative to project).")
-    parser.add_argument("--to-file-format", default="md", choices=["md","json"], help="Format for --to-file: md or json.")
+    parser.add_argument("--to-file-format", default="md", choices=["md", "json"], help="Format for --to-file.")
 
     args = parser.parse_args()
 
-    FILE_CONTEXT = ""
-    if args.from_file:
-        FILE_CONTEXT = read_text(args.from_file)
-        if not args.task:
-            args.task = "Summarize the file."
+    bullets_n = args.bullets if args.bullets and args.bullets > 0 else None
 
-    def _maybe_write_to_file(output_text: str, output_json: dict | None = None):
+    def maybe_write(output_text: str, output_json: dict | None = None) -> None:
         if not args.to_file:
             return
-        if args.to_file_format == 'json':
+
+        # If user asked for markdown and we have structured JSON, render it nicely.
+        if args.to_file_format == "md" and isinstance(output_json, dict):
+            title = str(output_json.get("title", "")).strip()
+            bullets = output_json.get("bullets", [])
+
+            lines = []
+            if title:
+                lines.append(f"# {title}")
+                lines.append("")
+
+            if isinstance(bullets, list) and bullets:
+                for b in bullets:
+                    b = str(b).strip()
+                    if b:
+                        lines.append(f"- {b}")
+            else:
+                # Fallback to raw text if no bullets list
+                if output_text.strip():
+                    lines.append(output_text.strip())
+
+            write_text(args.to_file, "\n".join(lines).strip() + "\n")
+            print(f"\nWrote to: {args.to_file}")
+            return
+
+        # JSON file output: write JSON if we have it; otherwise wrap text
+        if args.to_file_format == "json":
             if output_json is None:
-                output_json = {'text': output_text}
+                output_json = {"text": output_text}
             write_text(args.to_file, json.dumps(output_json, indent=2))
-        else:
-            write_text(args.to_file, output_text)
+            print(f"\nWrote to: {args.to_file}")
+            return
+
+        # Plain text markdown fallback (no structured json)
+        write_text(args.to_file, (output_text.strip() + "\n") if output_text.strip() else "")
         print(f"\nWrote to: {args.to_file}")
 
+    # Attach file content if requested
+    if args.from_file:
+        file_text = read_text(args.from_file)
+        if not args.task:
+            args.task = "Summarize the file."
+        args.task = args.task + "\n\n[FILE CONTENT]\n" + file_text
 
-    # Print the last run log entry (full JSON)
+    # Last run log entry (full JSON)
     if args.last_run:
         events = read_last(1)
         if not events:
@@ -174,7 +208,7 @@ def main():
     if args.last_output or args.open_last:
         last_path = _find_last_saved_path()
         if not last_path:
-            print("No saved outputs found in run log yet. Run a command with --save first.")
+            print("No saved outputs found in run log yet. Run a command with --save (or --verify) first.")
             return
         if args.open_last:
             _open_file(last_path)
@@ -225,10 +259,6 @@ def main():
         print("Provide a task, or use --show-memory / --add-memory / --show-log / --last-output.")
         return
 
-    # Task + file context
-    if FILE_CONTEXT:
-        args.task = args.task + "\n\n[FILE CONTENT]\n" + FILE_CONTEXT
-
     # Build memory context if requested
     q = args.memory_query.strip() or None
     ctx = memory_as_context(query=q, limit=args.memory_limit)
@@ -239,32 +269,36 @@ def main():
     if args.chat:
         text = generate(args.task, stream=False)
         print(text)
-        _maybe_write_to_file(text)
+        maybe_write(text)
         log_run({
             "mode": "chat",
             "task": args.task,
             "title": (text[:60] + "…") if len(text) > 60 else text,
             "strict": bool(args.strict),
             "verify": bool(args.verify),
+            "bullets": bullets_n,
         })
         return
 
-    # Router: only use memory if memory-query is provided AND returns context
+    # Router: use memory only if memory-query is provided AND returns context
     if args.router:
         if args.memory_query.strip() and ctx.strip():
             data = run_memory_agent(args.task, context=ctx)
             printable = {k: v for k, v in data.items() if k != "memory_to_save"}
             print(json.dumps(printable, indent=2))
-            _maybe_write_to_file(json.dumps(printable, indent=2), printable)
+            maybe_write(json.dumps(printable, indent=2), printable)
+
             mode = "router->memory"
             title = printable.get("title", "Result")
         else:
-            data = run_json_agent(args.task, strict=args.strict, verify=args.verify)
+            data = _call_json_agent(args.task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
             print(json.dumps(data, indent=2))
-            _maybe_write_to_file(json.dumps(data, indent=2), data)
+            maybe_write(json.dumps(data, indent=2), data)
+
             mode = "router->json"
             title = data.get("title", "Result")
 
+        # Auto-save if --verify
         if (args.save or args.verify) and isinstance(data, dict):
             saved_path = _save_json(data, args.out)
             print(f"\nSaved to: {saved_path}")
@@ -275,6 +309,7 @@ def main():
             "title": title,
             "strict": bool(args.strict),
             "verify": bool(args.verify),
+            "bullets": bullets_n,
             "memory_query": args.memory_query.strip(),
             "saved_to": saved_path,
         })
@@ -285,7 +320,7 @@ def main():
         data = run_memory_agent(args.task, context=ctx)
         printable = {k: v for k, v in data.items() if k != "memory_to_save"}
         print(json.dumps(printable, indent=2))
-        _maybe_write_to_file(json.dumps(printable, indent=2), printable)
+        maybe_write(json.dumps(printable, indent=2), printable)
 
         if args.save or args.verify:
             saved_path = _save_json(data, args.out)
@@ -295,15 +330,16 @@ def main():
             "mode": "memory",
             "task": args.task,
             "title": printable.get("title", "Result"),
+            "bullets": bullets_n,
             "memory_query": args.memory_query.strip(),
             "saved_to": saved_path,
         })
         return
 
     # Default: JSON agent (with optional strict/verify)
-    data = run_json_agent(args.task, strict=args.strict, verify=args.verify)
+    data = _call_json_agent(args.task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
     print(json.dumps(data, indent=2))
-    _maybe_write_to_file(json.dumps(data, indent=2), data)
+    maybe_write(json.dumps(data, indent=2), data)
 
     if args.save or args.verify:
         saved_path = _save_json(data, args.out)
@@ -315,6 +351,7 @@ def main():
         "title": data.get("title", "Result"),
         "strict": bool(args.strict),
         "verify": bool(args.verify),
+        "bullets": bullets_n,
         "saved_to": saved_path,
     })
 
