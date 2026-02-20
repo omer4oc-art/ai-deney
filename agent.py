@@ -9,6 +9,7 @@ from agent_json import run as run_json_agent
 from memory_agent import run as run_memory_agent
 from memory import add_memory, memory_as_context, list_memory
 from run_logger import log_run, read_last, search
+from file_tools import read_text, write_text
 
 
 def _save_json(data: dict, out: str = "") -> str:
@@ -126,7 +127,30 @@ def main():
     # Open last saved output matching a keyword
     parser.add_argument("--open-log", default="", help="Open the most recent saved output matching a keyword (task/title/mode).")
 
+    # File tools
+    parser.add_argument("--from-file", default="", help="Read a file (relative to project) and include it in the task context.")
+    parser.add_argument("--to-file", default="", help="Write the output to a file (relative to project).")
+    parser.add_argument("--to-file-format", default="md", choices=["md","json"], help="Format for --to-file: md or json.")
+
     args = parser.parse_args()
+
+    FILE_CONTEXT = ""
+    if args.from_file:
+        FILE_CONTEXT = read_text(args.from_file)
+        if not args.task:
+            args.task = "Summarize the file."
+
+    def _maybe_write_to_file(output_text: str, output_json: dict | None = None):
+        if not args.to_file:
+            return
+        if args.to_file_format == 'json':
+            if output_json is None:
+                output_json = {'text': output_text}
+            write_text(args.to_file, json.dumps(output_json, indent=2))
+        else:
+            write_text(args.to_file, output_text)
+        print(f"\nWrote to: {args.to_file}")
+
 
     # Print the last run log entry (full JSON)
     if args.last_run:
@@ -201,6 +225,10 @@ def main():
         print("Provide a task, or use --show-memory / --add-memory / --show-log / --last-output.")
         return
 
+    # Task + file context
+    if FILE_CONTEXT:
+        args.task = args.task + "\n\n[FILE CONTENT]\n" + FILE_CONTEXT
+
     # Build memory context if requested
     q = args.memory_query.strip() or None
     ctx = memory_as_context(query=q, limit=args.memory_limit)
@@ -211,6 +239,7 @@ def main():
     if args.chat:
         text = generate(args.task, stream=False)
         print(text)
+        _maybe_write_to_file(text)
         log_run({
             "mode": "chat",
             "task": args.task,
@@ -226,11 +255,13 @@ def main():
             data = run_memory_agent(args.task, context=ctx)
             printable = {k: v for k, v in data.items() if k != "memory_to_save"}
             print(json.dumps(printable, indent=2))
+            _maybe_write_to_file(json.dumps(printable, indent=2), printable)
             mode = "router->memory"
             title = printable.get("title", "Result")
         else:
             data = run_json_agent(args.task, strict=args.strict, verify=args.verify)
             print(json.dumps(data, indent=2))
+            _maybe_write_to_file(json.dumps(data, indent=2), data)
             mode = "router->json"
             title = data.get("title", "Result")
 
@@ -254,6 +285,7 @@ def main():
         data = run_memory_agent(args.task, context=ctx)
         printable = {k: v for k, v in data.items() if k != "memory_to_save"}
         print(json.dumps(printable, indent=2))
+        _maybe_write_to_file(json.dumps(printable, indent=2), printable)
 
         if args.save or args.verify:
             saved_path = _save_json(data, args.out)
@@ -271,6 +303,7 @@ def main():
     # Default: JSON agent (with optional strict/verify)
     data = run_json_agent(args.task, strict=args.strict, verify=args.verify)
     print(json.dumps(data, indent=2))
+    _maybe_write_to_file(json.dumps(data, indent=2), data)
 
     if args.save or args.verify:
         saved_path = _save_json(data, args.out)
