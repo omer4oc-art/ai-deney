@@ -24,9 +24,6 @@ def _save_json(data: dict, out: str = "") -> str:
 
 
 def _find_last_saved_path(limit: int = 5000) -> str:
-    """
-    Find the most recent run log entry that has a non-empty 'saved_to' path.
-    """
     events = read_last(limit)
     for e in reversed(events):
         p = (e.get("saved_to") or "").strip()
@@ -35,26 +32,35 @@ def _find_last_saved_path(limit: int = 5000) -> str:
     return ""
 
 
+def _find_last_saved_path_by_query(query: str, limit: int = 5000) -> str:
+    """
+    Find the most recent saved output whose run log matches the query
+    (matches task/title/mode), and returns the saved_to path.
+    """
+    hits = search(query, limit)
+    for e in reversed(hits):
+        p = (e.get("saved_to") or "").strip()
+        if p:
+            return p
+    return ""
+
+
 def _print_json_file(path: str) -> None:
     if not os.path.exists(path):
-        print(f"Last output file not found: {path}")
+        print(f"File not found: {path}")
         return
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         print(json.dumps(data, indent=2))
     except json.JSONDecodeError:
-        # If it's not valid JSON for some reason, print raw
         with open(path, "r", encoding="utf-8") as f:
             print(f.read())
 
 
 def _open_file(path: str) -> None:
-    """
-    Try opening in VS Code first, otherwise fallback to macOS 'open'.
-    """
     if not os.path.exists(path):
-        print(f"Last output file not found: {path}")
+        print(f"File not found: {path}")
         return
 
     # Try VS Code CLI
@@ -99,12 +105,34 @@ def main():
     parser.add_argument("--show-log", action="store_true", help="Show last N runs and exit.")
     parser.add_argument("--log-limit", type=int, default=20, help="How many runs to show with --show-log.")
     parser.add_argument("--search-log", default="", help="Search run log by keyword.")
+    parser.add_argument("--last-run", action="store_true", help="Print the most recent run log entry (full JSON) and exit.")
 
     # Last output helpers
     parser.add_argument("--last-output", action="store_true", help="Print the most recently saved JSON output and exit.")
     parser.add_argument("--open-last", action="store_true", help="Open the most recently saved JSON output and exit.")
 
+    # NEW: open last saved output that matches a keyword
+    parser.add_argument("--open-log", default="", help="Open the most recent saved output matching a keyword (task/title/mode).")
+
     args = parser.parse_args()
+
+    # NEW: show the last run log entry
+    if args.last_run:
+        events = read_last(1)
+        if not events:
+            print("No runs logged yet.")
+            return
+        print(json.dumps(events[0], indent=2))
+        return
+
+    # NEW: open last saved output matching keyword
+    if args.open_log:
+        path = _find_last_saved_path_by_query(args.open_log, limit=5000)
+        if not path:
+            print(f"No saved outputs found matching '{args.open_log}'. Try --show-log --search-log <keyword> first.")
+            return
+        _open_file(path)
+        return
 
     # LAST OUTPUT: print or open and exit
     if args.last_output or args.open_last:
