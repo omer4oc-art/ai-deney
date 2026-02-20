@@ -30,3 +30,21 @@ def healthcheck() -> bool:
         return r.status_code == 200
     except Exception:
         return False
+
+def generate_live(prompt: str, model: str = DEFAULT_MODEL, timeout: int = 300) -> None:
+    """
+    Stream tokens as they arrive and print them immediately (typing effect).
+    """
+    payload = {"model": model, "prompt": prompt, "stream": True}
+    with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=timeout) as r:
+        r.raise_for_status()
+        for line in r.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            data = json.loads(line)
+            chunk = data.get("response", "")
+            if chunk:
+                print(chunk, end="", flush=True)
+            if data.get("done"):
+                print()  # newline at end
+                break
