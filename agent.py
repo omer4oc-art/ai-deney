@@ -33,10 +33,6 @@ def _find_last_saved_path(limit: int = 5000) -> str:
 
 
 def _find_last_saved_path_by_query(query: str, limit: int = 5000) -> str:
-    """
-    Find the most recent saved output whose run log matches the query
-    (matches task/title/mode), and returns the saved_to path.
-    """
     hits = search(query, limit)
     for e in reversed(hits):
         p = (e.get("saved_to") or "").strip()
@@ -83,12 +79,28 @@ def main():
 
     # Modes
     parser.add_argument("--chat", action="store_true", help="Plain text response (no JSON).")
-    parser.add_argument("--use-memory", action="store_true", help="Ground answer strictly in saved memory.")
-    parser.add_argument("--router", action="store_true", help="Auto: use memory only when --memory-query is provided and returns context.")
+    parser.add_argument(
+        "--use-memory",
+        action="store_true",
+        help="Ground answer strictly in saved memory."
+    )
+    parser.add_argument(
+        "--router",
+        action="store_true",
+        help="Auto: use memory only when --memory-query is provided and returns context."
+    )
 
     # Quality controls
-    parser.add_argument("--strict", action="store_true", help="Do not guess facts; say unknown/varies when unsure.")
-    parser.add_argument("--verify", action="store_true", help="Add claims_to_verify + how_to_verify fields (self-audit).")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Do not guess facts; say unknown/varies when unsure."
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Add claims_to_verify + how_to_verify fields (self-audit)."
+    )
 
     # Memory controls
     parser.add_argument("--memory-query", default="", help="Filter memory context by keyword (e.g., week1).")
@@ -111,12 +123,12 @@ def main():
     parser.add_argument("--last-output", action="store_true", help="Print the most recently saved JSON output and exit.")
     parser.add_argument("--open-last", action="store_true", help="Open the most recently saved JSON output and exit.")
 
-    # NEW: open last saved output that matches a keyword
+    # Open last saved output matching a keyword
     parser.add_argument("--open-log", default="", help="Open the most recent saved output matching a keyword (task/title/mode).")
 
     args = parser.parse_args()
 
-    # NEW: show the last run log entry
+    # Print the last run log entry (full JSON)
     if args.last_run:
         events = read_last(1)
         if not events:
@@ -125,7 +137,7 @@ def main():
         print(json.dumps(events[0], indent=2))
         return
 
-    # NEW: open last saved output matching keyword
+    # Open last saved output matching keyword
     if args.open_log:
         path = _find_last_saved_path_by_query(args.open_log, limit=5000)
         if not path:
@@ -134,7 +146,7 @@ def main():
         _open_file(path)
         return
 
-    # LAST OUTPUT: print or open and exit
+    # Print/open the most recent saved JSON output
     if args.last_output or args.open_last:
         last_path = _find_last_saved_path()
         if not last_path:
@@ -222,7 +234,7 @@ def main():
             mode = "router->json"
             title = data.get("title", "Result")
 
-        if args.save and isinstance(data, dict):
+        if (args.save or args.verify) and isinstance(data, dict):
             saved_path = _save_json(data, args.out)
             print(f"\nSaved to: {saved_path}")
 
@@ -243,7 +255,7 @@ def main():
         printable = {k: v for k, v in data.items() if k != "memory_to_save"}
         print(json.dumps(printable, indent=2))
 
-        if args.save:
+        if args.save or args.verify:
             saved_path = _save_json(data, args.out)
             print(f"\nSaved to: {saved_path}")
 
@@ -260,7 +272,7 @@ def main():
     data = run_json_agent(args.task, strict=args.strict, verify=args.verify)
     print(json.dumps(data, indent=2))
 
-    if args.save:
+    if args.save or args.verify:
         saved_path = _save_json(data, args.out)
         print(f"\nSaved to: {saved_path}")
 
