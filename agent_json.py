@@ -17,6 +17,25 @@ def _ensure_five_nonempty(bullets):
         bullets.append("Not enough detail provided.")
     return bullets[:5]
 
+def _has_risky_claims(bullets) -> bool:
+    joined = " ".join([str(b) for b in bullets]).lower()
+
+    risky_words = [
+        "caffeine", "aspartame", "acesulfame", "sucralose",
+        "hfcs", "high fructose", "corn syrup",
+        "sugar", "sweetener", "ingredient", "preservative",
+        "sodium benzoate", "potassium sorbate",
+        "calorie", "kcal", "grams", " mg", "contains", "does not contain",
+        "sugar-free", "caffeine-free"
+    ]
+    if any(w in joined for w in risky_words):
+        return True
+
+    if any(ch.isdigit() for ch in joined) and any(u in joined for u in [" mg", "g ", "grams", "calorie", "kcal", "%"]):
+        return True
+
+    return False
+
 def run(task: str, strict: bool = False, verify: bool = False) -> dict:
     strict_rules = ""
     if strict:
@@ -36,19 +55,11 @@ Strict rules:
 }"""
         verify_rules = """
 Verify rules (STRICT):
-- You are not actually verifying anything. You are creating a checklist of what must be checked.
-- claims_to_verify MUST include the highest-risk factual claims from your bullets.
-- ALWAYS include (if present in bullets):
-  1) Every numeric claim (calories, mg caffeine, grams sugar, dates, percentages).
-  2) Every ingredient/sweetener/preservative claim (aspartame, HFCS, etc.).
-  3) Every "contains/does not contain" claim (sugar-free, caffeine-free, etc.).
-- If there are more than 3 such claims, choose the 3 most important for the user’s decision.
-- claims_to_verify items must be short, specific sentences copied from (or directly matching) your bullets.
-- how_to_verify must give a concrete method for each claim, in the same order, e.g.:
-  - "Check the nutrition label on the can/bottle"
-  - "Check Coca-Cola product nutrition page for US"
-  - "Compare ingredient lists on official packaging photos"
-- If your bullets contain none of the above risky claims, set claims_to_verify=["none"] and how_to_verify=["none"].
+- ONLY create claims_to_verify for risky factual claims (nutrition, ingredients, contains/does-not-contain, caffeine/sugar/calories).
+- If the bullets contain no such risky factual claims, set:
+  claims_to_verify=["none"] and how_to_verify=["none"].
+- If there are more than 3 risky claims, choose the 3 most important.
+- how_to_verify must be concrete: "nutrition label", "official product nutrition page", "ingredient list on packaging".
 """
     else:
         schema = """{
@@ -84,6 +95,11 @@ Rules:
     data["bullets"] = _ensure_five_nonempty(data.get("bullets", []))
 
     if verify:
+        if not _has_risky_claims(data["bullets"]):
+            data["claims_to_verify"] = ["none"]
+            data["how_to_verify"] = ["none"]
+            return data
+
         claims = data.get("claims_to_verify", [])
         how = data.get("how_to_verify", [])
 
@@ -95,7 +111,6 @@ Rules:
         claims = [str(x).strip() for x in claims if str(x).strip()]
         how = [str(x).strip() for x in how if str(x).strip()]
 
-        # If model forgot these fields, default to "none"
         if not claims:
             claims = ["none"]
         if not how:
@@ -104,17 +119,8 @@ Rules:
         data["claims_to_verify"] = claims[:3]
         data["how_to_verify"] = how[:3]
 
-        # If claims != how length, pad how_to_verify
         while len(data["how_to_verify"]) < len(data["claims_to_verify"]):
             data["how_to_verify"].append("Check official packaging label or brand nutrition page.")
         data["how_to_verify"] = data["how_to_verify"][:len(data["claims_to_verify"])]
 
     return data
-
-if __name__ == "__main__":
-    out = run(
-        "Compare Diet Coke vs Fanta Orange (regular, US). Mention sugar, calories, caffeine, and flavor.",
-        strict=True,
-        verify=True,
-    )
-    print(json.dumps(out, indent=2))
