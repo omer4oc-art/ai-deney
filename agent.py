@@ -7,6 +7,7 @@ from ollama_client import OllamaNotRunning, generate
 from agent_json import run as run_json_agent
 from memory_agent import run as run_memory_agent
 from memory import add_memory, memory_as_context, list_memory
+from run_logger import log_run, read_last
 
 
 def _save_json(data: dict, out: str = "") -> str:
@@ -45,13 +46,40 @@ def main():
     parser.add_argument("--save", action="store_true", help="Save JSON output to outputs/. (JSON modes only)")
     parser.add_argument("--out", default="", help="Custom JSON output path.")
 
+    # Logging
+    parser.add_argument("--show-log", action="store_true", help="Show last N runs and exit.")
+    parser.add_argument("--log-limit", type=int, default=20, help="How many runs to show with --show-log.")
+
     args = parser.parse_args()
+
+    # Show log and exit
+    if args.show_log:
+        events = read_last(args.log_limit)
+        if not events:
+            print("No runs logged yet.")
+            return
+        for e in events:
+            mode = e.get("mode", "?")
+            title = e.get("title", "")
+            task = e.get("task", "")
+            ts = e.get("ts", "")
+            saved = e.get("saved_to", "")
+            tail = f" | saved: {saved}" if saved else ""
+            print(f"- {ts} | {mode} | {title} | {task}{tail}")
+        return
 
     # Memory admin
     if args.add_memory:
         tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
         item = add_memory(args.add_memory, tags=tags, source="manual")
         print(f"Saved memory: ({item['id']}) {item['text']}")
+        # Log memory-add
+        log_run({
+            "mode": "add-memory",
+            "task": args.add_memory,
+            "title": "memory add",
+            "tags": tags,
+        })
         return
 
     if args.show_memory:
@@ -65,17 +93,27 @@ def main():
         return
 
     if not args.task:
-        print("Provide a task, or use --show-memory / --add-memory.")
-        return
-
-    # Chat mode (plain text)
-    if args.chat:
-        print(generate(args.task, stream=False))
+        print("Provide a task, or use --show-memory / --add-memory / --show-log.")
         return
 
     # Build memory context if requested
     q = args.memory_query.strip() or None
     ctx = memory_as_context(query=q, limit=args.memory_limit)
+
+    saved_path = ""
+
+    # Chat mode (plain text)
+    if args.chat:
+        text = generate(args.task, stream=False)
+        print(text)
+        log_run({
+            "mode": "chat",
+            "task": args.task,
+            "title": (text[:60] + "…") if len(text) > 60 else text,
+            "strict": bool(args.strict),
+            "verify": bool(args.verify),
+        })
+        return
 
     # Router: only use memory if memory-query is provided AND returns context
     if args.router:
@@ -83,13 +121,27 @@ def main():
             data = run_memory_agent(args.task, context=ctx)
             printable = {k: v for k, v in data.items() if k != "memory_to_save"}
             print(json.dumps(printable, indent=2))
+            mode = "router->memory"
+            title = printable.get("title", "Result")
         else:
             data = run_json_agent(args.task, strict=args.strict, verify=args.verify)
             print(json.dumps(data, indent=2))
+            mode = "router->json"
+            title = data.get("title", "Result")
 
         if args.save and isinstance(data, dict):
-            path = _save_json(data, args.out)
-            print(f"\nSaved to: {path}")
+            saved_path = _save_json(data, args.out)
+            print(f"\nSaved to: {saved_path}")
+
+        log_run({
+            "mode": mode,
+            "task": args.task,
+            "title": title,
+            "strict": bool(args.strict),
+            "verify": bool(args.verify),
+            "memory_query": args.memory_query.strip(),
+            "saved_to": saved_path,
+        })
         return
 
     # Explicit memory mode
@@ -97,17 +149,36 @@ def main():
         data = run_memory_agent(args.task, context=ctx)
         printable = {k: v for k, v in data.items() if k != "memory_to_save"}
         print(json.dumps(printable, indent=2))
+
         if args.save:
-            path = _save_json(data, args.out)
-            print(f"\nSaved to: {path}")
+            saved_path = _save_json(data, args.out)
+            print(f"\nSaved to: {saved_path}")
+
+        log_run({
+            "mode": "memory",
+            "task": args.task,
+            "title": printable.get("title", "Result"),
+            "memory_query": args.memory_query.strip(),
+            "saved_to": saved_path,
+        })
         return
 
     # Default: JSON agent (with optional strict/verify)
     data = run_json_agent(args.task, strict=args.strict, verify=args.verify)
     print(json.dumps(data, indent=2))
+
     if args.save:
-        path = _save_json(data, args.out)
-        print(f"\nSaved to: {path}")
+        saved_path = _save_json(data, args.out)
+        print(f"\nSaved to: {saved_path}")
+
+    log_run({
+        "mode": "json",
+        "task": args.task,
+        "title": data.get("title", "Result"),
+        "strict": bool(args.strict),
+        "verify": bool(args.verify),
+        "saved_to": saved_path,
+    })
 
 
 if __name__ == "__main__":
