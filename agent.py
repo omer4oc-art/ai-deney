@@ -7,7 +7,7 @@ from ollama_client import OllamaNotRunning, generate
 from agent_json import run as run_json_agent
 from memory_agent import run as run_memory_agent
 from memory import add_memory, memory_as_context, list_memory
-from run_logger import log_run, read_last
+from run_logger import log_run, read_last, search
 
 
 def _save_json(data: dict, out: str = "") -> str:
@@ -49,12 +49,13 @@ def main():
     # Logging
     parser.add_argument("--show-log", action="store_true", help="Show last N runs and exit.")
     parser.add_argument("--log-limit", type=int, default=20, help="How many runs to show with --show-log.")
+    parser.add_argument("--search-log", default="", help="Search run log by keyword.")
 
     args = parser.parse_args()
 
     # Show log and exit
     if args.show_log:
-        events = read_last(args.log_limit)
+        events = search(args.search_log, args.log_limit) if args.search_log else read_last(args.log_limit)
         if not events:
             print("No runs logged yet.")
             return
@@ -73,7 +74,6 @@ def main():
         tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
         item = add_memory(args.add_memory, tags=tags, source="manual")
         print(f"Saved memory: ({item['id']}) {item['text']}")
-        # Log memory-add
         log_run({
             "mode": "add-memory",
             "task": args.add_memory,
