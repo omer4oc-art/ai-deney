@@ -17,17 +17,17 @@ def _ensure_five_nonempty(bullets):
         bullets.append("Memory context did not include additional details.")
     return bullets[:5]
 
-def run(task: str, context: str = "") -> dict:
-    # Guard: if memory context is empty, do NOT answer with outside facts
-    if not context.strip() or context.strip() == "No saved memory yet.":
+def run(task: str, context: str) -> dict:
+    # If there’s no memory context, refuse instead of guessing.
+    if not context.strip():
         return {
-            "title": "Not in memory",
+            "title": "No relevant memory found",
             "bullets": [
-                "Your memory does not include information about this topic.",
-                "Run without --use-memory to get a normal model answer.",
-                "Example: python agent.py \"What is the difference between Diet Coke and Fanta?\"",
-                "Use --use-memory only for topics you have saved into memory (like week1 setup).",
-                "If you want, you can manually save a correct note to memory for reuse later."
+                "Memory context is empty for this query.",
+                "Run without --use-memory to get a general answer.",
+                "Or add a memory note if you want this remembered.",
+                "Tip: use --memory-query week1 for setup questions.",
+                "No valid answer can be generated from memory alone."
             ],
             "memory_to_save": ""
         }
@@ -36,10 +36,10 @@ def run(task: str, context: str = "") -> dict:
 
 You MUST follow these rules:
 - Use ONLY the Memory context facts. Do NOT invent facts.
-- If the memory does not contain enough info, say so.
-- Output exactly 5 bullets, no more, no less.
+- If memory lacks info, say so.
+- Output exactly 5 bullets.
 - Do not repeat the same item in multiple bullets.
-- memory_to_save MUST be an empty string unless the Task explicitly says "save this to memory:".
+- memory_to_save MUST be empty string unless Task explicitly says: "save this to memory:".
 
 Memory context:
 {context}
@@ -54,21 +54,13 @@ Return JSON with this exact schema:
 }}
 """
     text = generate(prompt, stream=False).strip()
-    if not text:
-        raise RuntimeError("Model returned empty output. Is `ollama serve` running?")
-
     json_text = _extract_json(text)
     if not json_text:
-        print("RAW MODEL OUTPUT (not JSON):\n", text)
         raise RuntimeError("Could not find JSON in model output.")
-
     data = json.loads(json_text)
 
-    # Enforce exactly 5 non-empty bullets (without adding facts)
+    data["title"] = str(data.get("title", "")).strip() or "Memory result"
     data["bullets"] = _ensure_five_nonempty(data.get("bullets", []))
-
-    # Enforce memory_to_save default
     if "memory_to_save" not in data or data["memory_to_save"] is None:
         data["memory_to_save"] = ""
-
     return data
