@@ -63,7 +63,11 @@ Verify rules:
     if bullets_n is None:
         bullet_rule = "- bullets can be any length (choose what fits the task)."
     else:
-        bullet_rule = f"- Output exactly {bullets_n} bullets."
+        bullet_rule = (
+            f"- Output AT MOST {bullets_n} bullets.\n"
+            f"- Do NOT invent new information to reach {bullets_n}.\n"
+            f"- If you only have 3 real bullets, output 3. The program will pad the rest with empty strings."
+    )
 
     prompt = f"""{SYSTEM}
 
