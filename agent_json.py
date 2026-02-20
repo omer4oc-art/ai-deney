@@ -4,57 +4,88 @@ from ollama_client import generate
 
 SYSTEM = "Return ONLY valid JSON. No extra text. No markdown."
 
-SETUP_CONTEXT = """Today on this Mac mini we:
-- installed Xcode Command Line Tools (xcode-select --install)
-- installed Homebrew and added it to PATH via ~/.zprofile
-- installed git, python, node, wget via Homebrew
-- installed Visual Studio Code via Homebrew cask
-- installed Ollama and downloaded llama3.1:8b
-- created a project folder ~/ai-deney/week1 and a Python venv .venv using Python 3.14.3
-- wrote Python scripts ollama_client.py and local_llm_test.py to call Ollama over http://127.0.0.1:11434
-"""
-
 def _extract_json(text: str) -> str:
     text = text.strip()
     if text.startswith("{") and text.endswith("}"):
         return text
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if m:
-        return m.group(0).strip()
-    return ""
+    return m.group(0).strip() if m else ""
 
-def run(task: str) -> dict:
+def _ensure_five_nonempty(bullets):
+    bullets = [b.strip() for b in bullets if isinstance(b, str) and b.strip()]
+    while len(bullets) < 5:
+        bullets.append("Not enough detail provided.")
+    return bullets[:5]
+
+def run(task: str, strict: bool = False, verify: bool = False) -> dict:
+    strict_rules = ""
+    if strict:
+        strict_rules = """
+Strict rules:
+- Do NOT guess facts (numbers, ingredients, dates, mg caffeine, calories).
+- If unsure, say "unknown/varies by variant" rather than inventing.
+- Prefer general, correct statements over specific, uncertain ones.
+"""
+
+    if verify:
+        schema = """{
+  "title": "string",
+  "bullets": ["string","string","string","string","string"],
+  "claims_to_verify": ["string","string","string"],
+  "how_to_verify": ["string","string","string"]
+}"""
+        verify_rules = """
+Verify rules:
+- claims_to_verify: list up to 3 factual claims in your bullets that could be wrong or vary by region/variant.
+- how_to_verify: for each claim, give a concrete way to check (e.g., "nutrition label", "brand website nutrition page", "USDA/FDA database", "photo of can label").
+- If your answer is fully general and not fact-specific, you can put "none" as the single item in claims_to_verify and how_to_verify.
+"""
+    else:
+        schema = """{
+  "title": "string",
+  "bullets": ["string","string","string","string","string"]
+}"""
+        verify_rules = ""
+
     prompt = f"""{SYSTEM}
 
-Context:
-{SETUP_CONTEXT}
-
 Task: {task}
+{strict_rules}
 
 Return JSON with this exact schema:
-{{
-  "title": "string",
-  "bullets": ["string", "string", "string", "string", "string"]
-}}
+{schema}
+
+Rules:
+- Output exactly 5 bullets.
+- No extra keys beyond the schema.
+{verify_rules}
 """
     text = generate(prompt, stream=False).strip()
-
     if not text:
         raise RuntimeError("Model returned empty output. Is `ollama serve` running?")
 
     json_text = _extract_json(text)
     if not json_text:
-        print("RAW MODEL OUTPUT (not JSON):")
-        print(text)
-        raise RuntimeError("Could not find a JSON object in the model output.")
+        print("RAW MODEL OUTPUT (not JSON):\n", text)
+        raise RuntimeError("Could not find JSON in model output.")
 
-    try:
-        return json.loads(json_text)
-    except json.JSONDecodeError as e:
-        print("RAW JSON CANDIDATE (failed to parse):")
-        print(json_text)
-        raise
+    data = json.loads(json_text)
+    data["title"] = str(data.get("title", "")).strip() or "Result"
+    data["bullets"] = _ensure_five_nonempty(data.get("bullets", []))
+
+    if verify:
+        # Ensure fields exist and are lists
+        claims = data.get("claims_to_verify", [])
+        how = data.get("how_to_verify", [])
+        if not isinstance(claims, list):
+            claims = [str(claims)]
+        if not isinstance(how, list):
+            how = [str(how)]
+        data["claims_to_verify"] = [str(x).strip() for x in claims if str(x).strip()][:3] or ["none"]
+        data["how_to_verify"] = [str(x).strip() for x in how if str(x).strip()][:3] or ["none"]
+
+    return data
 
 if __name__ == "__main__":
-    data = run("Summarize what we installed today and why in 5 bullets.")
-    print(json.dumps(data, indent=2))
+    out = run("Compare Diet Coke vs Fanta Orange (regular, US). Mention sugar, calories, caffeine, and flavor.", strict=True, verify=True)
+    print(json.dumps(out, indent=2))

@@ -4,12 +4,12 @@ import os
 from datetime import datetime
 
 from ollama_client import OllamaNotRunning, generate
-from json_agent import run as run_json
-from memory_agent import run as run_memory
-from memory import add_memory, list_memory, memory_as_context
+from agent_json import run as run_json_agent
+from memory_agent import run as run_memory_agent
+from memory import add_memory, memory_as_context, list_memory
 
 
-def save_json(data: dict, out: str = "") -> str:
+def _save_json(data: dict, out: str = "") -> str:
     os.makedirs("outputs", exist_ok=True)
     if out:
         path = out
@@ -27,9 +27,12 @@ def main():
 
     # Modes
     parser.add_argument("--chat", action="store_true", help="Plain text response (no JSON).")
-    parser.add_argument("--json", action="store_true", help="Structured JSON response (title + 5 bullets).")
     parser.add_argument("--use-memory", action="store_true", help="Ground answer strictly in saved memory.")
-    parser.add_argument("--router", action="store_true", help="Auto: use memory if available, else normal JSON.")
+    parser.add_argument("--router", action="store_true", help="Auto: use memory only when --memory-query is provided and returns context.")
+
+    # Quality controls
+    parser.add_argument("--strict", action="store_true", help="Do not guess facts; say unknown/varies when unsure.")
+    parser.add_argument("--verify", action="store_true", help="Add claims_to_verify + how_to_verify fields (self-audit).")
 
     # Memory controls
     parser.add_argument("--memory-query", default="", help="Filter memory context by keyword (e.g., week1).")
@@ -39,7 +42,7 @@ def main():
     parser.add_argument("--tags", default="", help="Comma-separated tags for --add-memory (e.g., week1,setup).")
 
     # Output
-    parser.add_argument("--save", action="store_true", help="Save JSON output to outputs/.")
+    parser.add_argument("--save", action="store_true", help="Save JSON output to outputs/. (JSON modes only)")
     parser.add_argument("--out", default="", help="Custom JSON output path.")
 
     args = parser.parse_args()
@@ -65,46 +68,45 @@ def main():
         print("Provide a task, or use --show-memory / --add-memory.")
         return
 
-    # Chat mode
+    # Chat mode (plain text)
     if args.chat:
         print(generate(args.task, stream=False))
         return
 
-    # Build memory context if needed
+    # Build memory context if requested
     q = args.memory_query.strip() or None
     ctx = memory_as_context(query=q, limit=args.memory_limit)
 
-    # Router mode: if memory exists, use memory agent; otherwise normal JSON agent
+    # Router: only use memory if memory-query is provided AND returns context
     if args.router:
-        # Router rule: only use memory when --memory-query is provided and returns context
-        if args.memory_query.strip():
-            if ctx.strip():
-                data = run_memory(args.task, context=ctx)
-            else:
-                data = run_json(args.task)
+        if args.memory_query.strip() and ctx.strip():
+            data = run_memory_agent(args.task, context=ctx)
+            printable = {k: v for k, v in data.items() if k != "memory_to_save"}
+            print(json.dumps(printable, indent=2))
         else:
-            data = run_json(args.task)
-        print(json.dumps({k: v for k, v in data.items() if k != 'memory_to_save'}, indent=2))
-        if args.save:
-            path = save_json(data, args.out)
+            data = run_json_agent(args.task, strict=args.strict, verify=args.verify)
+            print(json.dumps(data, indent=2))
+
+        if args.save and isinstance(data, dict):
+            path = _save_json(data, args.out)
             print(f"\nSaved to: {path}")
         return
 
     # Explicit memory mode
     if args.use_memory:
-        data = run_memory(args.task, context=ctx)
-        print(json.dumps({k: v for k, v in data.items() if k != "memory_to_save"}, indent=2))
+        data = run_memory_agent(args.task, context=ctx)
+        printable = {k: v for k, v in data.items() if k != "memory_to_save"}
+        print(json.dumps(printable, indent=2))
         if args.save:
-            path = save_json(data, args.out)
+            path = _save_json(data, args.out)
             print(f"\nSaved to: {path}")
         return
 
-    # Default: JSON mode (unless user forced otherwise)
-    # If --json is provided, do JSON (same default behavior)
-    data = run_json(args.task)
+    # Default: JSON agent (with optional strict/verify)
+    data = run_json_agent(args.task, strict=args.strict, verify=args.verify)
     print(json.dumps(data, indent=2))
     if args.save:
-        path = save_json(data, args.out)
+        path = _save_json(data, args.out)
         print(f"\nSaved to: {path}")
 
 
