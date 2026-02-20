@@ -14,7 +14,13 @@ def _extract_json(text: str) -> str:
 def run(task: str, context: str = "") -> dict:
     prompt = f"""{SYSTEM}
 
-Memory context (may help, do not invent facts beyond it):
+You MUST follow these rules:
+- Use ONLY the Memory context facts. Do NOT invent facts.
+- If the memory does not contain enough info, say so in the bullets.
+- Output exactly 5 bullets, no more, no less.
+- memory_to_save MUST be an empty string unless the Task explicitly says "save this to memory:".
+
+Memory context:
 {context}
 
 Task: {task}
@@ -22,19 +28,21 @@ Task: {task}
 Return JSON with this exact schema:
 {{
   "title": "string",
-  "bullets": ["string", "string", "string", "string", "string"],
+  "bullets": ["string","string","string","string","string"],
   "memory_to_save": "string"
 }}
-
-Rules for memory_to_save:
-- If there is nothing worth saving, set it to an empty string.
-- If there is something worth saving, make it one short sentence (max ~20 words).
 """
     text = generate(prompt, stream=False).strip()
     if not text:
         raise RuntimeError("Model returned empty output. Is `ollama serve` running?")
     json_text = _extract_json(text)
     if not json_text:
-        print("RAW MODEL OUTPUT (not JSON):\n", text)
         raise RuntimeError("Could not find JSON in model output.")
-    return json.loads(json_text)
+    data = json.loads(json_text)
+
+    # Hard-enforce exactly 5 bullets
+    bullets = data.get("bullets", [])
+    bullets = bullets[:5] + [""] * (5 - len(bullets))
+    data["bullets"] = bullets
+
+    return data
