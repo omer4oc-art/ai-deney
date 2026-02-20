@@ -18,6 +18,8 @@ You MUST follow these rules:
 - Use ONLY the Memory context facts. Do NOT invent facts.
 - If the memory does not contain enough info, say so in the bullets.
 - Output exactly 5 bullets, no more, no less.
+- Each bullet should include BOTH: (a) the item, and (b) what it is for (purpose).
+- If the task asks about "what we installed", cover ALL major installs mentioned in memory across the 5 bullets (combine items if needed).
 - memory_to_save MUST be an empty string unless the Task explicitly says "save this to memory:".
 
 Memory context:
@@ -44,5 +46,7 @@ Return JSON with this exact schema:
     bullets = data.get("bullets", [])
     bullets = bullets[:5] + [""] * (5 - len(bullets))
     data["bullets"] = bullets
-
+    # Hard-enforce memory_to_save default
+    if "memory_to_save" not in data or data["memory_to_save"] is None:
+        data["memory_to_save"] = ""
     return data
