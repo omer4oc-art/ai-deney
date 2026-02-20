@@ -76,11 +76,15 @@ def main():
 
     # Router mode: if memory exists, use memory agent; otherwise normal JSON agent
     if args.router:
-        if ctx.strip():
-            data = run_memory(args.task, context=ctx)
+        # Router rule: only use memory when --memory-query is provided and returns context
+        if args.memory_query.strip():
+            if ctx.strip():
+                data = run_memory(args.task, context=ctx)
+            else:
+                data = run_json(args.task)
         else:
             data = run_json(args.task)
-        print(json.dumps({k: v for k, v in data.items() if k != "memory_to_save"}, indent=2))
+        print(json.dumps({k: v for k, v in data.items() if k != 'memory_to_save'}, indent=2))
         if args.save:
             path = save_json(data, args.out)
             print(f"\nSaved to: {path}")
