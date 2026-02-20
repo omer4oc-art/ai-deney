@@ -8,3 +8,6 @@ __pycache__/
 
 # VS Code (keep settings.json tracked if you want; otherwise ignore the folder)
 # .vscode/
+
+# Generated outputs
+outputs/
