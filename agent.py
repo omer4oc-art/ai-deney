@@ -2,7 +2,7 @@ import argparse
 import json
 import os
 from datetime import datetime
-
+from ollama_client import OllamaNotRunning
 from agent_json import run as run_json_agent
 from memory_agent import run as run_memory_agent
 from memory import add_memory, memory_as_context, list_memory
@@ -67,4 +67,8 @@ def main():
         print(f"\nSaved to: {path}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except OllamaNotRunning as e:
+        print(str(e))
+        raise SystemExit(1)
