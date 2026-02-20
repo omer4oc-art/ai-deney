@@ -18,11 +18,25 @@ def _ensure_five_nonempty(bullets):
     return bullets[:5]
 
 def run(task: str, context: str = "") -> dict:
+    # Guard: if memory context is empty, do NOT answer with outside facts
+    if not context.strip() or context.strip() == "No saved memory yet.":
+        return {
+            "title": "Not in memory",
+            "bullets": [
+                "Your memory does not include information about this topic.",
+                "Run without --use-memory to get a normal model answer.",
+                "Example: python agent.py \"What is the difference between Diet Coke and Fanta?\"",
+                "Use --use-memory only for topics you have saved into memory (like week1 setup).",
+                "If you want, you can manually save a correct note to memory for reuse later."
+            ],
+            "memory_to_save": ""
+        }
+
     prompt = f"""{SYSTEM}
 
 You MUST follow these rules:
 - Use ONLY the Memory context facts. Do NOT invent facts.
-- If memory does not contain enough info, say so.
+- If the memory does not contain enough info, say so.
 - Output exactly 5 bullets, no more, no less.
 - Do not repeat the same item in multiple bullets.
 - memory_to_save MUST be an empty string unless the Task explicitly says "save this to memory:".
@@ -49,8 +63,11 @@ Return JSON with this exact schema:
         raise RuntimeError("Could not find JSON in model output.")
 
     data = json.loads(json_text)
+
+    # Enforce exactly 5 non-empty bullets (without adding facts)
     data["bullets"] = _ensure_five_nonempty(data.get("bullets", []))
 
+    # Enforce memory_to_save default
     if "memory_to_save" not in data or data["memory_to_save"] is None:
         data["memory_to_save"] = ""
 
