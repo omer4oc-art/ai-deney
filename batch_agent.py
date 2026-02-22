@@ -259,15 +259,39 @@ def main():
             except Exception:
                 digests.append({"task": label, "title": "", "bullets": ["(could not parse output)"]})
 
-        review_prompt = f"""Write a concise review of this batch run.
+        review_prompt = f"""Write a markdown review of this batch run.
 
-You are reviewing the outputs of a local AI batch run. Create a markdown report with these sections:
-1) Key takeaways (max {args.review_bullets} bullets)
-2) Action items (max {args.review_bullets} bullets)
-3) Risks / things to verify (max {args.review_bullets} bullets)
-4) Suggested next batch tasks (max {args.review_bullets} bullets)
+You are reviewing the outputs of a local AI batch run. Use ONLY the digest below. Do NOT invent facts.
 
-Use simple language. Be specific. Do not invent facts beyond the batch outputs.
+Format EXACTLY like this:
+
+# Batch Run Review: {outdir.name}
+
+## Task-by-task assessment
+For each task, include:
+- **Task:** <task text>
+- **Output title:** <title>
+- **What it answered well:** one sentence
+- **What is missing / unclear:** one sentence
+- **Quoted bullets:** include up to 2 bullets EXACTLY as written (or say "no bullets")
+
+## Key takeaways
+- Max {args.review_bullets} bullets
+- Each bullet must be grounded in the digest (avoid generic statements)
+
+## Action items
+- Max {args.review_bullets} bullets
+- Each action item must be concrete (e.g., "Re-run task 2 with BULLETS=3" or "Add FILE=...")
+
+## Risks / things to verify
+- Max {args.review_bullets} bullets
+- ONLY list items that are actually uncertain/variant-dependent based on the digest.
+- If there are no risks, write exactly: "None."
+
+## Suggested next batch tasks
+- Max {args.review_bullets} bullets
+- Write tasks in the same style as tasks_file lines (short imperative prompts).
+- Prefer tasks that improve weak outputs from above.
 
 Batch outputs digest (JSON):
 {json.dumps(digests, indent=2)}
