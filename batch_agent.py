@@ -333,7 +333,8 @@ Batch outputs digest (JSON):
                     continue
                 line = re.sub(r"^[-*]\s+", "", line)
                 line = re.sub(r"^\d+\.\s+", "", line)
-        line = re.sub(r"^task:\s*", "", line, flags=re.IGNORECASE)
+                line = re.sub(r"^task:\s*", "", line, flags=re.IGNORECASE)
+
                 lines.append(line)
                 if len(lines) >= args.next_tasks_n:
                     break
