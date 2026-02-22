@@ -165,6 +165,7 @@ def main():
     parser.add_argument("--open", action="store_true", help="Open the batch index (and review if created) in VS Code.")
     parser.add_argument("--next-tasks", action="store_true", help="Generate next_tasks.txt for the next batch run.")
     parser.add_argument("--next-tasks-n", type=int, default=8, help="How many tasks to generate for next_tasks.txt.")
+    parser.add_argument("--topic-guard", action="store_true", help="Flag likely off-topic outputs (writes .warning.txt and notes in index).")
     
     args = parser.parse_args()
 
