@@ -315,7 +315,8 @@ Rules:
 - If a task should use a file, use FILE=<path> at the start of the line (example: FILE=sample.md Summarize in 3 bullets.)
 - Prefer tasks that fix weaknesses mentioned in the review and expand on good outputs.
 - Do NOT invent file names unless they already appear in the digest or review.
-
+- NEVER output FILE=... unless that exact filename appears in the digest or review.
+- Prefer rewriting tasks to include constraints directly (example: "Summarize in 3 bullets") rather than referring to CLI flags.
 Review text:
 {review_text}
 
@@ -332,6 +333,7 @@ Batch outputs digest (JSON):
                     continue
                 line = re.sub(r"^[-*]\s+", "", line)
                 line = re.sub(r"^\d+\.\s+", "", line)
+        line = re.sub(r"^task:\s*", "", line, flags=re.IGNORECASE)
                 lines.append(line)
                 if len(lines) >= args.next_tasks_n:
                     break
