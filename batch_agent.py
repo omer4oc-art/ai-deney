@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import shlex
 from datetime import datetime
 from pathlib import Path
 
@@ -12,34 +13,57 @@ from run_logger import log_run
 from file_tools import read_text, write_text
 
 
-
-def _call_json_agent(task: str, strict: bool, verify: bool, bullets_n):
-    try:
-        return run_json_agent(task, strict=strict, verify=verify, bullets_n=bullets_n)
-    except TypeError:
-        return run_json_agent(task, strict=strict, verify=verify)
-
 def _slug(s: str, max_len: int = 60) -> str:
     s = s.strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
     return (s[:max_len].rstrip("-")) or "task"
 
 
-def _load_tasks(path: str) -> list[str]:
+def _parse_task_line(line: str) -> tuple[str | None, str]:
+    """
+    Supports:
+      - normal task line
+      - FILE=path task...
+      - FILE="path with spaces" task...
+    Returns: (file_path_or_none, task_text)
+    """
+    line = line.strip()
+    if not line:
+        return None, ""
+
+    # Keep comments out
+    if line.startswith("#"):
+        return None, ""
+
+    # Use shlex to respect quotes
+    parts = shlex.split(line)
+    if not parts:
+        return None, ""
+
+    file_path = None
+    if parts[0].startswith("FILE="):
+        file_path = parts[0].split("=", 1)[1].strip()
+        task_text = " ".join(parts[1:]).strip()
+        if not task_text:
+            task_text = "Summarize the file."
+        return file_path, task_text
+
+    return None, line
+
+
+def _load_tasks(path: str) -> list[tuple[str | None, str]]:
     text = read_text(path, max_chars=300_000)
-    tasks = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            continue
-        tasks.append(line)
+    tasks: list[tuple[str | None, str]] = []
+    for raw in text.splitlines():
+        fp, task = _parse_task_line(raw)
+        if task:
+            tasks.append((fp, task))
     return tasks
 
 
 def _render_md(title: str, bullets: list[str]) -> str:
     lines = []
+    title = title.strip()
     if title:
         lines.append(f"# {title}")
         lines.append("")
@@ -51,7 +75,7 @@ def _render_md(title: str, bullets: list[str]) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch runner for your local agent.")
+    parser = argparse.ArgumentParser(description="Batch runner for your local agent (supports FILE=... tasks).")
     parser.add_argument("tasks_file", help="Text file with one task per line (blank lines and #comments ignored).")
 
     # Mode selection
@@ -68,7 +92,7 @@ def main():
 
     # Output
     parser.add_argument("--outdir", default="", help="Output directory (relative to project). Default outputs/batch-<timestamp>/")
-    parser.add_argument("--format", choices=["json", "md"], default="json", help="Per-task output format for JSON modes.")
+    parser.add_argument("--format", choices=["json", "md"], default="md", help="Per-task output format for JSON modes.")
     args = parser.parse_args()
 
     bullets_n = args.bullets if args.bullets and args.bullets > 0 else None
@@ -97,8 +121,9 @@ def main():
     index_lines.append(f"- strict: `{args.strict}` | verify: `{args.verify}` | bullets: `{bullets_n if bullets_n is not None else 'variable'}`")
     index_lines.append("")
 
-    for i, task in enumerate(tasks, start=1):
-        short = _slug(task)
+    for i, (file_path, task) in enumerate(tasks, start=1):
+        label = task if not file_path else f"{task} (FILE={file_path})"
+        short = _slug(label)
         base = f"{i:03d}-{short}"
 
         # Decide mode per task
@@ -111,15 +136,21 @@ def main():
         else:
             mode = "json"
 
+        # Inject file content if requested on this line
+        full_task = task
+        if file_path:
+            file_text = read_text(file_path)
+            full_task = full_task + "\n\n[FILE CONTENT]\n" + file_text
+
         try:
             saved_path = ""
 
             if mode == "chat":
-                text = generate(task, stream=False)
+                text = generate(full_task, stream=False)
                 saved_path = str(outdir / f"{base}.txt")
                 write_text(saved_path, text.strip() + "\n")
 
-                index_lines.append(f"## {i}. {task}")
+                index_lines.append(f"## {i}. {label}")
                 index_lines.append(f"- output: `{Path(saved_path).name}`")
                 index_lines.append("")
                 index_lines.append("```")
@@ -127,14 +158,14 @@ def main():
                 index_lines.append("```")
                 index_lines.append("")
 
-                log_run({"mode": "batch->chat", "task": task, "title": text[:60], "saved_to": saved_path})
+                log_run({"mode": "batch->chat", "task": label, "title": text[:60], "saved_to": saved_path})
 
             else:
                 if mode.endswith("memory"):
-                    data = run_memory_agent(task, context=ctx)
+                    data = run_memory_agent(full_task, context=ctx)
                     printable = {k: v for k, v in data.items() if k != "memory_to_save"}
                 else:
-                    printable = _call_json_agent(task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
+                    printable = run_json_agent(full_task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
 
                 if args.format == "md":
                     saved_path = str(outdir / f"{base}.md")
@@ -144,13 +175,13 @@ def main():
                     saved_path = str(outdir / f"{base}.json")
                     write_text(saved_path, json.dumps(printable, indent=2) + "\n")
 
-                index_lines.append(f"## {i}. {task}")
+                index_lines.append(f"## {i}. {label}")
                 index_lines.append(f"- output: `{Path(saved_path).name}`")
                 index_lines.append("")
 
                 log_run({
                     "mode": f"batch->{mode}",
-                    "task": task,
+                    "task": label,
                     "title": printable.get("title", "Result"),
                     "strict": bool(args.strict),
                     "verify": bool(args.verify),
@@ -164,11 +195,11 @@ def main():
         except Exception as e:
             err_path = outdir / f"{base}.error.txt"
             err_path.write_text(str(e) + "\n", encoding="utf-8")
-            index_lines.append(f"## {i}. {task}")
+            index_lines.append(f"## {i}. {label}")
             index_lines.append(f"- ERROR: `{err_path.name}`")
             index_lines.append("")
 
-            log_run({"mode": "batch->error", "task": task, "title": "error", "saved_to": str(err_path)})
+            log_run({"mode": "batch->error", "task": label, "title": "error", "saved_to": str(err_path)})
 
     index_path = outdir / "index.md"
     index_path.write_text("\n".join(index_lines).strip() + "\n", encoding="utf-8")
