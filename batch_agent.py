@@ -12,6 +12,13 @@ from run_logger import log_run
 from file_tools import read_text, write_text
 
 
+
+def _call_json_agent(task: str, strict: bool, verify: bool, bullets_n):
+    try:
+        return run_json_agent(task, strict=strict, verify=verify, bullets_n=bullets_n)
+    except TypeError:
+        return run_json_agent(task, strict=strict, verify=verify)
+
 def _slug(s: str, max_len: int = 60) -> str:
     s = s.strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
@@ -110,7 +117,7 @@ def main():
             if mode == "chat":
                 text = generate(task, stream=False)
                 saved_path = str(outdir / f"{base}.txt")
-                write_text(str(Path(saved_path).relative_to(Path.cwd())), text.strip() + "\n")
+                write_text(saved_path, text.strip() + "\n")
 
                 index_lines.append(f"## {i}. {task}")
                 index_lines.append(f"- output: `{Path(saved_path).name}`")
@@ -127,15 +134,15 @@ def main():
                     data = run_memory_agent(task, context=ctx)
                     printable = {k: v for k, v in data.items() if k != "memory_to_save"}
                 else:
-                    printable = run_json_agent(task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
+                    printable = _call_json_agent(task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
 
                 if args.format == "md":
                     saved_path = str(outdir / f"{base}.md")
                     md = _render_md(str(printable.get("title", "")).strip(), printable.get("bullets", []))
-                    write_text(str(Path(saved_path).relative_to(Path.cwd())), md)
+                    write_text(saved_path, md)
                 else:
                     saved_path = str(outdir / f"{base}.json")
-                    write_text(str(Path(saved_path).relative_to(Path.cwd())), json.dumps(printable, indent=2) + "\n")
+                    write_text(saved_path, json.dumps(printable, indent=2) + "\n")
 
                 index_lines.append(f"## {i}. {task}")
                 index_lines.append(f"- output: `{Path(saved_path).name}`")
