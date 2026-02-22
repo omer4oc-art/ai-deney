@@ -301,9 +301,10 @@ Batch outputs digest (JSON):
         review_text = generate(review_prompt, stream=False).strip()
         review_path = outdir / "review.md"
         review_path.write_text(review_text + "\n", encoding="utf-8")
-        # NEW: Auto-generate next_tasks.txt
-if args.next_tasks:
-    next_prompt = f"""You are a batch-run manager. Create the NEXT batch tasks file.
+
+        # NEW: Auto-generate next_tasks.txt (only after review exists)
+        if args.next_tasks:
+            next_prompt = f"""You are a batch-run manager. Create the NEXT batch tasks file.
 
 Rules:
 - Output plain text ONLY (no markdown).
@@ -321,30 +322,36 @@ Review text:
 Batch outputs digest (JSON):
 {json.dumps(digests, indent=2)}
 """
-    next_text = generate(next_prompt, stream=False).strip()
+            next_text = generate(next_prompt, stream=False).strip()
 
-    # Clean up: remove empty lines and extra formatting
-    lines = []
-    for line in next_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # strip accidental bullets/numbers
-        line = re.sub(r"^[-*]\s+", "", line)
-        line = re.sub(r"^\d+\.\s+", "", line)
-        lines.append(line)
-        if len(lines) >= args.next_tasks_n:
-            break
+            # Clean up: remove empty lines and accidental bullets/numbers
+            lines = []
+            for line in next_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                line = re.sub(r"^[-*]\s+", "", line)
+                line = re.sub(r"^\d+\.\s+", "", line)
+                lines.append(line)
+                if len(lines) >= args.next_tasks_n:
+                    break
 
-    next_tasks_path = outdir / "next_tasks.txt"
-    next_tasks_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+            next_tasks_path = outdir / "next_tasks.txt"
+            next_tasks_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
-    log_run({
-        "mode": "batch->next_tasks",
-        "task": f"next tasks for {outdir.name}",
-        "title": "next_tasks",
-        "saved_to": str(next_tasks_path),
-    })
+            log_run({
+                "mode": "batch->next_tasks",
+                "task": f"next tasks for {outdir.name}",
+                "title": "next_tasks",
+                "saved_to": str(next_tasks_path),
+            })
+
+        log_run({
+            "mode": "batch->review",
+            "task": f"review for {outdir.name}",
+            "title": "batch review",
+            "saved_to": str(review_path),
+        })
     log_run({
             "mode": "batch->review",
             "task": f"review for {outdir.name}",
@@ -362,8 +369,8 @@ Batch outputs digest (JSON):
 
     if args.open:
         _open_in_vscode(index_path)
-        if args.review:
-            _open_in_vscode(outdir / "review.md")
+    if args.review:
+        _open_in_vscode(outdir / "review.md")
 
 
 if __name__ == "__main__":
