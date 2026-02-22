@@ -93,6 +93,51 @@ def _open_in_vscode(path: Path) -> None:
     except Exception:
         pass
 
+STOPWORDS = {
+    "the","a","an","and","or","to","of","in","on","for","with","is","are","was","were",
+    "be","as","at","by","from","this","that","it","its","your","you","we","our","i",
+    "explain","summarize","rewrite","provide","include","add","make","give","why","how",
+    "simple","terms","bullets","bullet","points","point","paragraph","use","uses","usage"
+}
+
+DRIFT_WORDS = {
+    # common “product/ingredient” drift you hit earlier
+    "ingredient","ingredients","nutrition","nutritional","calorie","calories","sugar",
+    "caffeine","aspartame","hfcs","corn syrup","allergen","allergens","preservative",
+    "label","packaging","mg","grams","serving"
+}
+
+def _keywords(text: str) -> set[str]:
+    text = text.lower()
+    words = re.findall(r"[a-z0-9]+", text)
+    return {w for w in words if len(w) >= 3 and w not in STOPWORDS}
+
+def topic_guard(task_text: str, output_title: str, output_bullets: list[str]) -> tuple[bool, str]:
+    """
+    Returns (is_off_topic, reason).
+    Heuristic: if task keywords barely appear in output AND drift words appear, flag it.
+    """
+    task_keys = _keywords(task_text)
+    out_text = (output_title or "") + " " + " ".join(output_bullets or [])
+    out_text_l = out_text.lower()
+    out_keys = _keywords(out_text)
+
+    if not task_keys:
+        return False, "no task keywords"
+
+    overlap = task_keys.intersection(out_keys)
+    overlap_ratio = len(overlap) / max(1, len(task_keys))
+
+    drift_hits = [w for w in DRIFT_WORDS if w in out_text_l]
+
+    # Thresholds tuned for short tasks
+    too_low_overlap = overlap_ratio < 0.15 and len(overlap) <= 1
+    has_drift = len(drift_hits) >= 2
+
+    if too_low_overlap and has_drift:
+        return True, f"low keyword overlap ({len(overlap)}/{len(task_keys)}); drift words: {', '.join(drift_hits[:6])}"
+
+    return False, f"ok overlap ({len(overlap)}/{len(task_keys)})"
 
 def main():
     parser = argparse.ArgumentParser(description="Batch runner for your local agent (supports FILE=... tasks).")
@@ -120,6 +165,7 @@ def main():
     parser.add_argument("--open", action="store_true", help="Open the batch index (and review if created) in VS Code.")
     parser.add_argument("--next-tasks", action="store_true", help="Generate next_tasks.txt for the next batch run.")
     parser.add_argument("--next-tasks-n", type=int, default=8, help="How many tasks to generate for next_tasks.txt.")
+    
     args = parser.parse_args()
 
     bullets_n = args.bullets if args.bullets and args.bullets > 0 else None
@@ -189,7 +235,29 @@ def main():
                 index_lines.append("")
 
                 produced_files.append((label, saved_path))
+                # Topic guard (optional)
+                if args.topic_guard:
+                    title = str(printable.get("title", "")).strip()
+                    bullets = printable.get("bullets", [])
+                    if not isinstance(bullets, list):
+                        bullets = []
+                    bullets = [str(b).strip() for b in bullets if str(b).strip()]
 
+                    off, reason = topic_guard(label, title, bullets)
+                    if off:
+                        warn_path = outdir / f"{base}.warning.txt"
+                        warn_path.write_text(
+                            f"OFF-TOPIC WARNING\nTask: {label}\nReason: {reason}\nOutput file: {saved_path.name}\n",
+                            encoding="utf-8"
+                    )
+                    index_lines.append(f"- ⚠️ OFF-TOPIC: `{warn_path.name}` ({reason})")
+                    index_lines.append("")
+                    log_run({
+                    "mode": "batch->topic_guard",
+                    "task": label,
+                    "title": "off-topic",
+                    "saved_to": str(warn_path),
+                    })
                 log_run({"mode": "batch->chat", "task": label, "title": text[:60], "saved_to": str(saved_path)})
 
             else:
@@ -334,7 +402,6 @@ Batch outputs digest (JSON):
                 line = re.sub(r"^[-*]\s+", "", line)
                 line = re.sub(r"^\d+\.\s+", "", line)
                 line = re.sub(r"^task:\s*", "", line, flags=re.IGNORECASE)
-
                 lines.append(line)
                 if len(lines) >= args.next_tasks_n:
                     break
