@@ -118,6 +118,8 @@ def main():
     parser.add_argument("--review", action="store_true", help="Generate a review.md that summarizes the whole batch.")
     parser.add_argument("--review-bullets", type=int, default=7, help="How many bullets per section in review (suggested 5–10).")
     parser.add_argument("--open", action="store_true", help="Open the batch index (and review if created) in VS Code.")
+    parser.add_argument("--next-tasks", action="store_true", help="Generate next_tasks.txt for the next batch run.")
+    parser.add_argument("--next-tasks-n", type=int, default=8, help="How many tasks to generate for next_tasks.txt.")
     args = parser.parse_args()
 
     bullets_n = args.bullets if args.bullets and args.bullets > 0 else None
@@ -299,8 +301,51 @@ Batch outputs digest (JSON):
         review_text = generate(review_prompt, stream=False).strip()
         review_path = outdir / "review.md"
         review_path.write_text(review_text + "\n", encoding="utf-8")
+        # NEW: Auto-generate next_tasks.txt
+if args.next_tasks:
+    next_prompt = f"""You are a batch-run manager. Create the NEXT batch tasks file.
 
-        log_run({
+Rules:
+- Output plain text ONLY (no markdown).
+- One task per line.
+- No numbering, no bullets.
+- Max {args.next_tasks_n} lines.
+- Each line must be a runnable task in the same style as tasks files.
+- If a task should use a file, use FILE=<path> at the start of the line (example: FILE=sample.md Summarize in 3 bullets.)
+- Prefer tasks that fix weaknesses mentioned in the review and expand on good outputs.
+- Do NOT invent file names unless they already appear in the digest or review.
+
+Review text:
+{review_text}
+
+Batch outputs digest (JSON):
+{json.dumps(digests, indent=2)}
+"""
+    next_text = generate(next_prompt, stream=False).strip()
+
+    # Clean up: remove empty lines and extra formatting
+    lines = []
+    for line in next_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # strip accidental bullets/numbers
+        line = re.sub(r"^[-*]\s+", "", line)
+        line = re.sub(r"^\d+\.\s+", "", line)
+        lines.append(line)
+        if len(lines) >= args.next_tasks_n:
+            break
+
+    next_tasks_path = outdir / "next_tasks.txt"
+    next_tasks_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+    log_run({
+        "mode": "batch->next_tasks",
+        "task": f"next tasks for {outdir.name}",
+        "title": "next_tasks",
+        "saved_to": str(next_tasks_path),
+    })
+    log_run({
             "mode": "batch->review",
             "task": f"review for {outdir.name}",
             "title": "batch review",
@@ -311,6 +356,9 @@ Batch outputs digest (JSON):
     print(f"Index: {index_path}")
     if args.review:
         print(f"Review: {outdir / 'review.md'}")
+
+    if args.next_tasks:
+        print(f"Next tasks: {outdir / 'next_tasks.txt'}")
 
     if args.open:
         _open_in_vscode(index_path)
