@@ -2,6 +2,7 @@ import argparse
 import json
 import re
 import shlex
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -28,14 +29,9 @@ def _parse_task_line(line: str) -> tuple[str | None, str]:
     Returns: (file_path_or_none, task_text)
     """
     line = line.strip()
-    if not line:
+    if not line or line.startswith("#"):
         return None, ""
 
-    # Keep comments out
-    if line.startswith("#"):
-        return None, ""
-
-    # Use shlex to respect quotes
     parts = shlex.split(line)
     if not parts:
         return None, ""
@@ -74,6 +70,30 @@ def _render_md(title: str, bullets: list[str]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _extract_from_md(md_text: str) -> tuple[str, list[str]]:
+    """
+    Very simple parser: first markdown heading becomes title, '- ' lines become bullets.
+    """
+    title = ""
+    bullets: list[str] = []
+    for line in md_text.splitlines():
+        line = line.rstrip()
+        if not title and line.startswith("#"):
+            title = line.lstrip("#").strip()
+        if line.startswith("- "):
+            b = line[2:].strip()
+            if b:
+                bullets.append(b)
+    return title, bullets
+
+
+def _open_in_vscode(path: Path) -> None:
+    try:
+        subprocess.run(["code", str(path)], check=False)
+    except Exception:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="Batch runner for your local agent (supports FILE=... tasks).")
     parser.add_argument("tasks_file", help="Text file with one task per line (blank lines and #comments ignored).")
@@ -93,6 +113,11 @@ def main():
     # Output
     parser.add_argument("--outdir", default="", help="Output directory (relative to project). Default outputs/batch-<timestamp>/")
     parser.add_argument("--format", choices=["json", "md"], default="md", help="Per-task output format for JSON modes.")
+
+    # NEW: Review pass
+    parser.add_argument("--review", action="store_true", help="Generate a review.md that summarizes the whole batch.")
+    parser.add_argument("--review-bullets", type=int, default=7, help="How many bullets per section in review (suggested 5–10).")
+    parser.add_argument("--open", action="store_true", help="Open the batch index (and review if created) in VS Code.")
     args = parser.parse_args()
 
     bullets_n = args.bullets if args.bullets and args.bullets > 0 else None
@@ -121,6 +146,9 @@ def main():
     index_lines.append(f"- strict: `{args.strict}` | verify: `{args.verify}` | bullets: `{bullets_n if bullets_n is not None else 'variable'}`")
     index_lines.append("")
 
+    # Track outputs for review
+    produced_files: list[tuple[str, Path]] = []  # (label, path)
+
     for i, (file_path, task) in enumerate(tasks, start=1):
         label = task if not file_path else f"{task} (FILE={file_path})"
         short = _slug(label)
@@ -143,22 +171,24 @@ def main():
             full_task = full_task + "\n\n[FILE CONTENT]\n" + file_text
 
         try:
-            saved_path = ""
+            saved_path: Path
 
             if mode == "chat":
                 text = generate(full_task, stream=False)
-                saved_path = str(outdir / f"{base}.txt")
-                write_text(saved_path, text.strip() + "\n")
+                saved_path = outdir / f"{base}.txt"
+                saved_path.write_text(text.strip() + "\n", encoding="utf-8")
 
                 index_lines.append(f"## {i}. {label}")
-                index_lines.append(f"- output: `{Path(saved_path).name}`")
+                index_lines.append(f"- output: `{saved_path.name}`")
                 index_lines.append("")
                 index_lines.append("```")
                 index_lines.append(text.strip())
                 index_lines.append("```")
                 index_lines.append("")
 
-                log_run({"mode": "batch->chat", "task": label, "title": text[:60], "saved_to": saved_path})
+                produced_files.append((label, saved_path))
+
+                log_run({"mode": "batch->chat", "task": label, "title": text[:60], "saved_to": str(saved_path)})
 
             else:
                 if mode.endswith("memory"):
@@ -168,16 +198,18 @@ def main():
                     printable = run_json_agent(full_task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
 
                 if args.format == "md":
-                    saved_path = str(outdir / f"{base}.md")
+                    saved_path = outdir / f"{base}.md"
                     md = _render_md(str(printable.get("title", "")).strip(), printable.get("bullets", []))
-                    write_text(saved_path, md)
+                    saved_path.write_text(md, encoding="utf-8")
                 else:
-                    saved_path = str(outdir / f"{base}.json")
-                    write_text(saved_path, json.dumps(printable, indent=2) + "\n")
+                    saved_path = outdir / f"{base}.json"
+                    saved_path.write_text(json.dumps(printable, indent=2) + "\n", encoding="utf-8")
 
                 index_lines.append(f"## {i}. {label}")
-                index_lines.append(f"- output: `{Path(saved_path).name}`")
+                index_lines.append(f"- output: `{saved_path.name}`")
                 index_lines.append("")
+
+                produced_files.append((label, saved_path))
 
                 log_run({
                     "mode": f"batch->{mode}",
@@ -186,7 +218,7 @@ def main():
                     "strict": bool(args.strict),
                     "verify": bool(args.verify),
                     "memory_query": args.memory_query.strip(),
-                    "saved_to": saved_path,
+                    "saved_to": str(saved_path),
                 })
 
         except OllamaNotRunning as e:
@@ -198,14 +230,68 @@ def main():
             index_lines.append(f"## {i}. {label}")
             index_lines.append(f"- ERROR: `{err_path.name}`")
             index_lines.append("")
-
             log_run({"mode": "batch->error", "task": label, "title": "error", "saved_to": str(err_path)})
 
+    # Write index
     index_path = outdir / "index.md"
     index_path.write_text("\n".join(index_lines).strip() + "\n", encoding="utf-8")
 
+    # NEW: Review pass
+    if args.review:
+        # Build a compact digest from produced files
+        digests = []
+        for label, path in produced_files:
+            try:
+                if path.suffix == ".json":
+                    obj = json.loads(path.read_text(encoding="utf-8"))
+                    title = str(obj.get("title", "")).strip()
+                    bullets = obj.get("bullets", [])
+                    if not isinstance(bullets, list):
+                        bullets = []
+                    bullets = [str(b).strip() for b in bullets if str(b).strip()]
+                elif path.suffix == ".md":
+                    title, bullets = _extract_from_md(path.read_text(encoding="utf-8"))
+                else:
+                    # txt
+                    title = label
+                    bullets = [path.read_text(encoding="utf-8").strip()]
+                digests.append({"task": label, "title": title, "bullets": bullets[:8]})
+            except Exception:
+                digests.append({"task": label, "title": "", "bullets": ["(could not parse output)"]})
+
+        review_prompt = f"""Write a concise review of this batch run.
+
+You are reviewing the outputs of a local AI batch run. Create a markdown report with these sections:
+1) Key takeaways (max {args.review_bullets} bullets)
+2) Action items (max {args.review_bullets} bullets)
+3) Risks / things to verify (max {args.review_bullets} bullets)
+4) Suggested next batch tasks (max {args.review_bullets} bullets)
+
+Use simple language. Be specific. Do not invent facts beyond the batch outputs.
+
+Batch outputs digest (JSON):
+{json.dumps(digests, indent=2)}
+"""
+        review_text = generate(review_prompt, stream=False).strip()
+        review_path = outdir / "review.md"
+        review_path.write_text(review_text + "\n", encoding="utf-8")
+
+        log_run({
+            "mode": "batch->review",
+            "task": f"review for {outdir.name}",
+            "title": "batch review",
+            "saved_to": str(review_path),
+        })
+
     print(f"Batch complete. Outputs saved to: {outdir}")
     print(f"Index: {index_path}")
+    if args.review:
+        print(f"Review: {outdir / 'review.md'}")
+
+    if args.open:
+        _open_in_vscode(index_path)
+        if args.review:
+            _open_in_vscode(outdir / "review.md")
 
 
 if __name__ == "__main__":
