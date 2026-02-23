@@ -17,3 +17,13 @@ memory.json
 
 # Run logs
 runs/
+
+# Local scratch / curriculum artifacts
+data/
+docs/
+doc*.md
+sample.md
+tasks_*.txt
+next_tasks_*.txt
+patch_*.py
+random_cropping_torch_fixed.py
