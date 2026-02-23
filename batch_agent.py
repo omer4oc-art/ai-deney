@@ -418,6 +418,7 @@ Content rules:
 - Do NOT invent filenames.
 - Do NOT mention CLI flags and do NOT use "BULLETS=3".
 - If file content is short, do NOT demand impossible bullet counts. Prefer: "List ALL points present" or "Use as many bullets as needed".
+- Default to variable-length bullets. Only request an exact bullet count when it clearly helps (e.g., comparisons). Avoid repeating "exactly 7 bullets" as a default.
 
 Review text:
 {review_text}
