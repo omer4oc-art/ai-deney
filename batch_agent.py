@@ -430,6 +430,7 @@ Content rules:
 - Do NOT mention CLI flags and do NOT use "BULLETS=3".
 - If file content is short, do NOT demand impossible bullet counts. Prefer: "List ALL points present" or "Use as many bullets as needed".
 - Default to variable-length bullets. Only request an exact bullet count when it clearly helps. Avoid repeating "exactly 7 bullets" as a default.
+- IMPORTANT: Do NOT invent new syntaxes like TEXT= or use FILE= to mean "write a file". In this system, FILE= is ONLY for reading an existing file and MUST appear at the start of the line (FILE=path task...). If you cannot guarantee the file exists, do not use FILE= at all.
 
 Review text:
 {review_text}
@@ -460,6 +461,9 @@ Batch outputs digest (JSON):
                 if line.startswith("FILE=/") or line.startswith("FILE=~"):
                     continue
                 if line.startswith('"') and '"' in line[1:]:
+                    continue
+                # drop unsupported write-style lines
+                if 'TEXT=' in line:
                     continue
 
                 if line:
