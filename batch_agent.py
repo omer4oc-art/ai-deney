@@ -403,6 +403,8 @@ Batch outputs digest (JSON):
                 line = line.strip()
                 if not line:
                     continue
+
+                # existing cleanup
                 line = re.sub(r"^[-*]\s+", "", line)
                 line = re.sub(r"^\d+\.\s+", "", line)
                 line = re.sub(r"^task:\s*", "", line, flags=re.IGNORECASE)
@@ -410,8 +412,24 @@ Batch outputs digest (JSON):
                 line = re.sub(r"^rewrite:\s*", "", line, flags=re.IGNORECASE)
                 line = re.sub(r"^\(FILE=([^)]+)\)\s*", r"FILE=\1 ", line)
                 line = re.sub(r"\bBULLETS\s*=\s*\d+\b", "", line, flags=re.IGNORECASE).strip()
+
+                # NEW: drop meta/rules lines (not runnable tasks)
+                if line.lower().startswith("here is the next batch tasks file"):
+                    continue
+                if "use file=" in line.lower() and "only if" in line.lower():
+                    continue
+
+                # NEW: drop unsafe/irrelevant absolute FILE paths
+                if line.startswith("FILE=/") or line.startswith("FILE=~"):
+                    continue
+
+                # NEW: drop quoted rewrite instructions
+                if line.startswith('"') and '"' in line[1:]:
+                    continue
+
                 if line:
                     lines.append(line)
+
                 if len(lines) >= args.next_tasks_n:
                     break
 
