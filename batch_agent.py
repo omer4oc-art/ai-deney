@@ -1,5 +1,4 @@
 import argparse
-from email import parser
 import json
 import re
 import shlex
@@ -39,6 +38,9 @@ def _parse_task_line(line: str) -> tuple[str | None, str]:
 
     if parts[0].startswith("FILE="):
         file_path = parts[0].split("=", 1)[1].strip()
+        # tolerate accidental trailing colon: FILE=foo.md:
+        if file_path.endswith(":"):
+            file_path = file_path[:-1]
         task_text = " ".join(parts[1:]).strip() or "Summarize the file."
         return file_path, task_text
 
@@ -69,9 +71,6 @@ def _render_md(title: str, bullets: list[str]) -> str:
 
 
 def _extract_from_md(md_text: str) -> tuple[str, list[str]]:
-    """
-    Simple parser: first markdown heading becomes title, '- ' lines become bullets.
-    """
     title = ""
     bullets: list[str] = []
     for line in md_text.splitlines():
@@ -90,6 +89,22 @@ def _open_in_vscode(path: Path) -> None:
         subprocess.run(["code", str(path)], check=False)
     except Exception:
         pass
+
+
+def _find_latest_next_tasks() -> str:
+    """
+    Find newest outputs/batch-*/next_tasks.txt (by folder name).
+    Returns "" if none found.
+    """
+    root = Path("outputs")
+    if not root.exists():
+        return ""
+    batches = sorted(root.glob("batch-*"), key=lambda p: p.name, reverse=True)
+    for b in batches:
+        candidate = b / "next_tasks.txt"
+        if candidate.exists():
+            return str(candidate)
+    return ""
 
 
 # ----------------------------
@@ -134,24 +149,12 @@ def topic_guard(task_text: str, output_title: str, output_bullets: list[str]) ->
         return True, f"low keyword overlap ({len(overlap)}/{len(task_keys)}); drift words: {', '.join(drift_hits[:6])}"
     return False, f"ok overlap ({len(overlap)}/{len(task_keys)})"
 
-def _find_latest_next_tasks() -> str:
-    """
-    Finds the newest outputs/batch-*/next_tasks.txt (by folder name timestamp).
-    Returns the path string or "" if none found.
-    """
-    root = Path("outputs")
-    if not root.exists():
-        return ""
-    batches = sorted(root.glob("batch-*"), key=lambda p: p.name, reverse=True)
-    for b in batches:
-        candidate = b / "next_tasks.txt"
-        if candidate.exists():
-            return str(candidate)
-    return ""
 
 def main():
     parser = argparse.ArgumentParser(description="Batch runner for your local agent (supports FILE=... tasks).")
-    parser.add_argument("tasks_file", nargs="?", default="", help="Tasks file path. Optional if --run-latest-next is used.")
+
+    # Option A: tasks_file optional if --run-latest-next is used
+    parser.add_argument("tasks_file", nargs="?", default="", help="Tasks file. Optional if --run-latest-next is used.")
     parser.add_argument("--run-latest-next", action="store_true", help="Run newest outputs/batch-*/next_tasks.txt as the tasks file.")
 
     # Modes
@@ -183,7 +186,7 @@ def main():
     parser.add_argument("--open", action="store_true", help="Open index/review/next_tasks in VS Code.")
     args = parser.parse_args()
 
-    # Resolve tasks file
+    # Resolve tasks file (Option A)
     if args.run_latest_next and not args.tasks_file:
         latest = _find_latest_next_tasks()
         if not latest:
@@ -238,11 +241,20 @@ def main():
         else:
             mode = "json"
 
-        # Inject file content per task
+        # Inject file content per task (UPGRADE: skip missing files without crashing)
         full_task = task
         if file_path:
-            file_text = read_text(file_path)
-            full_task = full_task + "\n\n[FILE CONTENT]\n" + file_text
+            try:
+                file_text = read_text(file_path)
+                full_task = full_task + "\n\n[FILE CONTENT]\n" + file_text
+            except FileNotFoundError as e:
+                err_path = outdir / f"{base}.error.txt"
+                err_path.write_text(str(e) + "\n", encoding="utf-8")
+                index_lines.append(f"## {i}. {label}")
+                index_lines.append(f"- ERROR: `{err_path.name}` (missing file)")
+                index_lines.append("")
+                log_run({"mode": "batch->error", "task": label, "title": "missing file", "saved_to": str(err_path)})
+                continue
 
         try:
             if mode == "chat":
@@ -379,7 +391,6 @@ For each task, include:
 ## Action items
 - Max {args.review_bullets} bullets
 - Each action item must be runnable as a tasks_file line (no numbering, no bullets, no "Rewrite task:" prefix).
-- If you need to change a task, write the corrected task line itself.
 
 ## Risks / things to verify
 - Max {args.review_bullets} bullets
@@ -418,7 +429,7 @@ Content rules:
 - Do NOT invent filenames.
 - Do NOT mention CLI flags and do NOT use "BULLETS=3".
 - If file content is short, do NOT demand impossible bullet counts. Prefer: "List ALL points present" or "Use as many bullets as needed".
-- Default to variable-length bullets. Only request an exact bullet count when it clearly helps (e.g., comparisons). Avoid repeating "exactly 7 bullets" as a default.
+- Default to variable-length bullets. Only request an exact bullet count when it clearly helps. Avoid repeating "exactly 7 bullets" as a default.
 
 Review text:
 {review_text}
@@ -433,8 +444,6 @@ Batch outputs digest (JSON):
                 line = line.strip()
                 if not line:
                     continue
-
-                # existing cleanup
                 line = re.sub(r"^[-*]\s+", "", line)
                 line = re.sub(r"^\d+\.\s+", "", line)
                 line = re.sub(r"^task:\s*", "", line, flags=re.IGNORECASE)
@@ -443,23 +452,18 @@ Batch outputs digest (JSON):
                 line = re.sub(r"^\(FILE=([^)]+)\)\s*", r"FILE=\1 ", line)
                 line = re.sub(r"\bBULLETS\s*=\s*\d+\b", "", line, flags=re.IGNORECASE).strip()
 
-                # NEW: drop meta/rules lines (not runnable tasks)
+                # drop obvious meta/rules lines
                 if line.lower().startswith("here is the next batch tasks file"):
                     continue
                 if "use file=" in line.lower() and "only if" in line.lower():
                     continue
-
-                # NEW: drop unsafe/irrelevant absolute FILE paths
                 if line.startswith("FILE=/") or line.startswith("FILE=~"):
                     continue
-
-                # NEW: drop quoted rewrite instructions
                 if line.startswith('"') and '"' in line[1:]:
                     continue
 
                 if line:
                     lines.append(line)
-
                 if len(lines) >= args.next_tasks_n:
                     break
 
