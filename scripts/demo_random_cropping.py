@@ -1,5 +1,5 @@
 import torch
-from ai_deney.random_cropping import random_crop_chw, random_crop_bchw, random_crop_pair
+from ai_deney import random_crop_chw, random_crop_bchw, random_crop_pair
 
 def main():
     img = torch.randn(3, 224, 224)
