@@ -11,7 +11,7 @@ from agent_json import run as run_json_agent
 from memory_agent import run as run_memory_agent
 from memory import memory_as_context
 from run_logger import log_run
-from file_tools import read_text, write_text
+from file_tools import read_text
 
 
 def _slug(s: str, max_len: int = 60) -> str:
@@ -36,12 +36,9 @@ def _parse_task_line(line: str) -> tuple[str | None, str]:
     if not parts:
         return None, ""
 
-    file_path = None
     if parts[0].startswith("FILE="):
         file_path = parts[0].split("=", 1)[1].strip()
-        task_text = " ".join(parts[1:]).strip()
-        if not task_text:
-            task_text = "Summarize the file."
+        task_text = " ".join(parts[1:]).strip() or "Summarize the file."
         return file_path, task_text
 
     return None, line
@@ -58,12 +55,12 @@ def _load_tasks(path: str) -> list[tuple[str | None, str]]:
 
 
 def _render_md(title: str, bullets: list[str]) -> str:
+    title = (title or "").strip()
     lines = []
-    title = title.strip()
     if title:
         lines.append(f"# {title}")
         lines.append("")
-    for b in bullets:
+    for b in bullets or []:
         b = str(b).strip()
         if b:
             lines.append(f"- {b}")
@@ -72,7 +69,7 @@ def _render_md(title: str, bullets: list[str]) -> str:
 
 def _extract_from_md(md_text: str) -> tuple[str, list[str]]:
     """
-    Very simple parser: first markdown heading becomes title, '- ' lines become bullets.
+    Simple parser: first markdown heading becomes title, '- ' lines become bullets.
     """
     title = ""
     bullets: list[str] = []
@@ -93,15 +90,19 @@ def _open_in_vscode(path: Path) -> None:
     except Exception:
         pass
 
+
+# ----------------------------
+# Topic guard (heuristic)
+# ----------------------------
 STOPWORDS = {
     "the","a","an","and","or","to","of","in","on","for","with","is","are","was","were",
     "be","as","at","by","from","this","that","it","its","your","you","we","our","i",
     "explain","summarize","rewrite","provide","include","add","make","give","why","how",
-    "simple","terms","bullets","bullet","points","point","paragraph","use","uses","usage"
+    "simple","terms","bullets","bullet","points","point","paragraph","use","uses","usage",
+    "compare","difference","differences","between","about"
 }
 
 DRIFT_WORDS = {
-    # common “product/ingredient” drift you hit earlier
     "ingredient","ingredients","nutrition","nutritional","calorie","calories","sugar",
     "caffeine","aspartame","hfcs","corn syrup","allergen","allergens","preservative",
     "label","packaging","mg","grams","serving"
@@ -113,10 +114,6 @@ def _keywords(text: str) -> set[str]:
     return {w for w in words if len(w) >= 3 and w not in STOPWORDS}
 
 def topic_guard(task_text: str, output_title: str, output_bullets: list[str]) -> tuple[bool, str]:
-    """
-    Returns (is_off_topic, reason).
-    Heuristic: if task keywords barely appear in output AND drift words appear, flag it.
-    """
     task_keys = _keywords(task_text)
     out_text = (output_title or "") + " " + " ".join(output_bullets or [])
     out_text_l = out_text.lower()
@@ -127,46 +124,47 @@ def topic_guard(task_text: str, output_title: str, output_bullets: list[str]) ->
 
     overlap = task_keys.intersection(out_keys)
     overlap_ratio = len(overlap) / max(1, len(task_keys))
-
     drift_hits = [w for w in DRIFT_WORDS if w in out_text_l]
 
-    # Thresholds tuned for short tasks
     too_low_overlap = overlap_ratio < 0.15 and len(overlap) <= 1
     has_drift = len(drift_hits) >= 2
 
     if too_low_overlap and has_drift:
         return True, f"low keyword overlap ({len(overlap)}/{len(task_keys)}); drift words: {', '.join(drift_hits[:6])}"
-
     return False, f"ok overlap ({len(overlap)}/{len(task_keys)})"
+
 
 def main():
     parser = argparse.ArgumentParser(description="Batch runner for your local agent (supports FILE=... tasks).")
-    parser.add_argument("tasks_file", help="Text file with one task per line (blank lines and #comments ignored).")
+    parser.add_argument("tasks_file", help="Text file with one task per line (#comments ignored).")
 
-    # Mode selection
+    # Modes
     parser.add_argument("--chat", action="store_true", help="Plain text (chat) mode.")
     parser.add_argument("--use-memory", action="store_true", help="Force memory mode (grounded).")
-    parser.add_argument("--router", action="store_true", help="Router: memory only used when --memory-query is provided and memory exists.")
+    parser.add_argument("--router", action="store_true", help="Router: memory used only if --memory-query yields context.")
 
     # Controls
     parser.add_argument("--memory-query", default="", help="Filter memory context by keyword (e.g., week1).")
     parser.add_argument("--memory-limit", type=int, default=10, help="How many memory items to include.")
     parser.add_argument("--strict", action="store_true", help="Don't guess facts (JSON modes).")
     parser.add_argument("--verify", action="store_true", help="Add claims_to_verify/how_to_verify (JSON modes).")
-    parser.add_argument("--bullets", type=int, default=0, help="Force number of bullets (0 = model decides).")
+    parser.add_argument("--bullets", type=int, default=0, help="Force bullet count (0 = model decides).")
 
     # Output
-    parser.add_argument("--outdir", default="", help="Output directory (relative to project). Default outputs/batch-<timestamp>/")
+    parser.add_argument("--outdir", default="", help="Output directory. Default outputs/batch-<timestamp>/")
     parser.add_argument("--format", choices=["json", "md"], default="md", help="Per-task output format for JSON modes.")
 
-    # NEW: Review pass
-    parser.add_argument("--review", action="store_true", help="Generate a review.md that summarizes the whole batch.")
-    parser.add_argument("--review-bullets", type=int, default=7, help="How many bullets per section in review (suggested 5–10).")
-    parser.add_argument("--open", action="store_true", help="Open the batch index (and review if created) in VS Code.")
-    parser.add_argument("--next-tasks", action="store_true", help="Generate next_tasks.txt for the next batch run.")
-    parser.add_argument("--next-tasks-n", type=int, default=8, help="How many tasks to generate for next_tasks.txt.")
-    parser.add_argument("--topic-guard", action="store_true", help="Flag likely off-topic outputs (writes .warning.txt and notes in index).")
-    
+    # Review + next tasks
+    parser.add_argument("--review", action="store_true", help="Generate review.md.")
+    parser.add_argument("--review-bullets", type=int, default=7, help="Bullets per section in review.")
+    parser.add_argument("--next-tasks", action="store_true", help="Generate next_tasks.txt (requires --review).")
+    parser.add_argument("--next-tasks-n", type=int, default=8, help="How many lines for next_tasks.txt.")
+
+    # Topic guard
+    parser.add_argument("--topic-guard", action="store_true", help="Flag likely off-topic outputs (writes .warning.txt + notes in index).")
+
+    # Convenience
+    parser.add_argument("--open", action="store_true", help="Open index/review/next_tasks in VS Code.")
     args = parser.parse_args()
 
     bullets_n = args.bullets if args.bullets and args.bullets > 0 else None
@@ -182,10 +180,10 @@ def main():
     # Load tasks
     tasks = _load_tasks(args.tasks_file)
     if not tasks:
-        print("No tasks found (file empty or only comments).")
+        print("No tasks found.")
         return
 
-    # Memory context (optional)
+    # Memory context
     q = args.memory_query.strip() or None
     ctx = memory_as_context(query=q, limit=args.memory_limit)
 
@@ -195,15 +193,13 @@ def main():
     index_lines.append(f"- strict: `{args.strict}` | verify: `{args.verify}` | bullets: `{bullets_n if bullets_n is not None else 'variable'}`")
     index_lines.append("")
 
-    # Track outputs for review
     produced_files: list[tuple[str, Path]] = []  # (label, path)
 
     for i, (file_path, task) in enumerate(tasks, start=1):
         label = task if not file_path else f"{task} (FILE={file_path})"
-        short = _slug(label)
-        base = f"{i:03d}-{short}"
+        base = f"{i:03d}-{_slug(label)}"
 
-        # Decide mode per task
+        # Decide mode
         if args.chat:
             mode = "chat"
         elif args.use_memory:
@@ -213,15 +209,13 @@ def main():
         else:
             mode = "json"
 
-        # Inject file content if requested on this line
+        # Inject file content per task
         full_task = task
         if file_path:
             file_text = read_text(file_path)
             full_task = full_task + "\n\n[FILE CONTENT]\n" + file_text
 
         try:
-            saved_path: Path
-
             if mode == "chat":
                 text = generate(full_task, stream=False)
                 saved_path = outdir / f"{base}.txt"
@@ -236,61 +230,59 @@ def main():
                 index_lines.append("")
 
                 produced_files.append((label, saved_path))
-                # Topic guard (optional)
-                if args.topic_guard:
-                    title = str(printable.get("title", "")).strip()
-                    bullets = printable.get("bullets", [])
-                    if not isinstance(bullets, list):
-                        bullets = []
-                    bullets = [str(b).strip() for b in bullets if str(b).strip()]
+                log_run({"mode": "batch->chat", "task": label, "title": text[:60], "saved_to": str(saved_path)})
+                continue
 
-                    off, reason = topic_guard(label, title, bullets)
-                    if off:
-                        warn_path = outdir / f"{base}.warning.txt"
-                        warn_path.write_text(
-                            f"OFF-TOPIC WARNING\nTask: {label}\nReason: {reason}\nOutput file: {saved_path.name}\n",
-                            encoding="utf-8"
+            # JSON/memory result
+            if mode.endswith("memory"):
+                data = run_memory_agent(full_task, context=ctx)
+                printable = {k: v for k, v in data.items() if k != "memory_to_save"}
+            else:
+                printable = run_json_agent(full_task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
+
+            # Save output
+            if args.format == "md":
+                saved_path = outdir / f"{base}.md"
+                md = _render_md(str(printable.get("title", "")).strip(), printable.get("bullets", []))
+                saved_path.write_text(md, encoding="utf-8")
+            else:
+                saved_path = outdir / f"{base}.json"
+                saved_path.write_text(json.dumps(printable, indent=2) + "\n", encoding="utf-8")
+
+            index_lines.append(f"## {i}. {label}")
+            index_lines.append(f"- output: `{saved_path.name}`")
+            index_lines.append("")
+
+            produced_files.append((label, saved_path))
+
+            # Topic guard (ONLY for structured outputs)
+            if args.topic_guard:
+                title = str(printable.get("title", "")).strip()
+                bullets = printable.get("bullets", [])
+                if not isinstance(bullets, list):
+                    bullets = []
+                bullets = [str(b).strip() for b in bullets if str(b).strip()]
+
+                off, reason = topic_guard(label, title, bullets)
+                if off:
+                    warn_path = outdir / f"{base}.warning.txt"
+                    warn_path.write_text(
+                        f"OFF-TOPIC WARNING\nTask: {label}\nReason: {reason}\nOutput file: {saved_path.name}\n",
+                        encoding="utf-8"
                     )
                     index_lines.append(f"- ⚠️ OFF-TOPIC: `{warn_path.name}` ({reason})")
                     index_lines.append("")
-                    log_run({
-                    "mode": "batch->topic_guard",
-                    "task": label,
-                    "title": "off-topic",
-                    "saved_to": str(warn_path),
-                    })
-                log_run({"mode": "batch->chat", "task": label, "title": text[:60], "saved_to": str(saved_path)})
+                    log_run({"mode": "batch->topic_guard", "task": label, "title": "off-topic", "saved_to": str(warn_path)})
 
-            else:
-                if mode.endswith("memory"):
-                    data = run_memory_agent(full_task, context=ctx)
-                    printable = {k: v for k, v in data.items() if k != "memory_to_save"}
-                else:
-                    printable = run_json_agent(full_task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
-
-                if args.format == "md":
-                    saved_path = outdir / f"{base}.md"
-                    md = _render_md(str(printable.get("title", "")).strip(), printable.get("bullets", []))
-                    saved_path.write_text(md, encoding="utf-8")
-                else:
-                    saved_path = outdir / f"{base}.json"
-                    saved_path.write_text(json.dumps(printable, indent=2) + "\n", encoding="utf-8")
-
-                index_lines.append(f"## {i}. {label}")
-                index_lines.append(f"- output: `{saved_path.name}`")
-                index_lines.append("")
-
-                produced_files.append((label, saved_path))
-
-                log_run({
-                    "mode": f"batch->{mode}",
-                    "task": label,
-                    "title": printable.get("title", "Result"),
-                    "strict": bool(args.strict),
-                    "verify": bool(args.verify),
-                    "memory_query": args.memory_query.strip(),
-                    "saved_to": str(saved_path),
-                })
+            log_run({
+                "mode": f"batch->{mode}",
+                "task": label,
+                "title": printable.get("title", "Result"),
+                "strict": bool(args.strict),
+                "verify": bool(args.verify),
+                "memory_query": args.memory_query.strip(),
+                "saved_to": str(saved_path),
+            })
 
         except OllamaNotRunning as e:
             print(str(e))
@@ -307,9 +299,11 @@ def main():
     index_path = outdir / "index.md"
     index_path.write_text("\n".join(index_lines).strip() + "\n", encoding="utf-8")
 
-    # NEW: Review pass
+    review_path: Path | None = None
+    next_tasks_path: Path | None = None
+
+    # Review (+ next tasks)
     if args.review:
-        # Build a compact digest from produced files
         digests = []
         for label, path in produced_files:
             try:
@@ -323,7 +317,6 @@ def main():
                 elif path.suffix == ".md":
                     title, bullets = _extract_from_md(path.read_text(encoding="utf-8"))
                 else:
-                    # txt
                     title = label
                     bullets = [path.read_text(encoding="utf-8").strip()]
                 digests.append({"task": label, "title": title, "bullets": bullets[:8]})
@@ -336,8 +329,8 @@ You are reviewing the outputs of a local AI batch run. Use ONLY the digest below
 
 Hard rules:
 - Do NOT mention CLI flags like --bullets, --strict, --verify, or text like BULLETS=3.
-- If a task asked for N items (e.g., 2 examples) and the output provided fewer, call that out explicitly.
-- If a FILE-based task asks for more bullets than the file supports, say so (do not suggest inventing bullets).
+- If a task asked for N items and the output provided fewer, call that out explicitly.
+- If a FILE-based task asks for more bullets than the file supports, say so.
 
 Format EXACTLY like this:
 
@@ -353,7 +346,6 @@ For each task, include:
 
 ## Key takeaways
 - Max {args.review_bullets} bullets
-- Each bullet must be grounded in the digest (avoid generic statements)
 
 ## Action items
 - Max {args.review_bullets} bullets
@@ -362,7 +354,6 @@ For each task, include:
 
 ## Risks / things to verify
 - Max {args.review_bullets} bullets
-- ONLY list items that are actually uncertain/variant-dependent based on the digest.
 - If there are no risks, write exactly: "None."
 
 ## Suggested next batch tasks
@@ -377,7 +368,13 @@ For each task, include:
 Batch outputs digest (JSON):
 {json.dumps(digests, indent=2)}
 """
-        next_prompt = f"""You are a batch-run manager. Create the NEXT batch tasks file.
+        review_text = generate(review_prompt, stream=False).strip()
+        review_path = outdir / "review.md"
+        review_path.write_text(review_text + "\n", encoding="utf-8")
+        log_run({"mode": "batch->review", "task": f"review for {outdir.name}", "title": "batch review", "saved_to": str(review_path)})
+
+        if args.next_tasks:
+            next_prompt = f"""You are a batch-run manager. Create the NEXT batch tasks file.
 
 Output rules (VERY STRICT):
 - Output plain text ONLY (no markdown).
@@ -387,13 +384,11 @@ Output rules (VERY STRICT):
 
 Content rules:
 - Each line must be runnable as a tasks_file line.
-- If a line needs a file, it MUST start with FILE=<path> (example: FILE=sample.md Summarize in 3 bullets.)
+- If a line needs a file, it MUST start with FILE=<path>.
 - NEVER output FILE=... unless that exact filename appears in the digest or review text.
 - Do NOT invent filenames.
-- Do NOT mention CLI flags like --bullets/--strict/--verify and do NOT use "BULLETS=3".
-- If the file content is short, do NOT demand an impossible number of bullets. Prefer: "List ALL points present" or "Use as many bullets as needed".
-
-Use the review to prioritize fixing failures (missing required count, off-topic drift) before adding new topics.
+- Do NOT mention CLI flags and do NOT use "BULLETS=3".
+- If file content is short, do NOT demand impossible bullet counts. Prefer: "List ALL points present" or "Use as many bullets as needed".
 
 Review text:
 {review_text}
@@ -401,42 +396,42 @@ Review text:
 Batch outputs digest (JSON):
 {json.dumps(digests, indent=2)}
 """
+            next_text = generate(next_prompt, stream=False).strip()
+
+            lines = []
+            for line in next_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                line = re.sub(r"^[-*]\s+", "", line)
+                line = re.sub(r"^\d+\.\s+", "", line)
+                line = re.sub(r"^task:\s*", "", line, flags=re.IGNORECASE)
+                line = re.sub(r"^rewrite task:\s*", "", line, flags=re.IGNORECASE)
+                line = re.sub(r"^rewrite:\s*", "", line, flags=re.IGNORECASE)
+                line = re.sub(r"^\(FILE=([^)]+)\)\s*", r"FILE=\1 ", line)
+                line = re.sub(r"\bBULLETS\s*=\s*\d+\b", "", line, flags=re.IGNORECASE).strip()
+                if line:
+                    lines.append(line)
+                if len(lines) >= args.next_tasks_n:
+                    break
 
             next_tasks_path = outdir / "next_tasks.txt"
             next_tasks_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
-
-            log_run({
-                "mode": "batch->next_tasks",
-                "task": f"next tasks for {outdir.name}",
-                "title": "next_tasks",
-                "saved_to": str(next_tasks_path),
-            })
-
-        log_run({
-            "mode": "batch->review",
-            "task": f"review for {outdir.name}",
-            "title": "batch review",
-            "saved_to": str(review_path),
-        })
-    log_run({
-            "mode": "batch->review",
-            "task": f"review for {outdir.name}",
-            "title": "batch review",
-            "saved_to": str(review_path),
-        })
+            log_run({"mode": "batch->next_tasks", "task": f"next tasks for {outdir.name}", "title": "next_tasks", "saved_to": str(next_tasks_path)})
 
     print(f"Batch complete. Outputs saved to: {outdir}")
     print(f"Index: {index_path}")
-    if args.review:
-        print(f"Review: {outdir / 'review.md'}")
-
-    if args.next_tasks:
-        print(f"Next tasks: {outdir / 'next_tasks.txt'}")
+    if review_path:
+        print(f"Review: {review_path}")
+    if next_tasks_path:
+        print(f"Next tasks: {next_tasks_path}")
 
     if args.open:
         _open_in_vscode(index_path)
-    if args.review:
-        _open_in_vscode(outdir / "review.md")
+        if review_path:
+            _open_in_vscode(review_path)
+        if next_tasks_path:
+            _open_in_vscode(next_tasks_path)
 
 
 if __name__ == "__main__":
