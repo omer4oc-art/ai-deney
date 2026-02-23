@@ -334,6 +334,11 @@ def main():
 
 You are reviewing the outputs of a local AI batch run. Use ONLY the digest below. Do NOT invent facts.
 
+Hard rules:
+- Do NOT mention CLI flags like --bullets, --strict, --verify, or text like BULLETS=3.
+- If a task asked for N items (e.g., 2 examples) and the output provided fewer, call that out explicitly.
+- If a FILE-based task asks for more bullets than the file supports, say so (do not suggest inventing bullets).
+
 Format EXACTLY like this:
 
 # Batch Run Review: {outdir.name}
@@ -352,7 +357,8 @@ For each task, include:
 
 ## Action items
 - Max {args.review_bullets} bullets
-- Each action item must be concrete (e.g., "Re-run task 2 with BULLETS=3" or "Add FILE=...")
+- Each action item must be runnable as a tasks_file line (no numbering, no bullets, no "Rewrite task:" prefix).
+- If you need to change a task, write the corrected task line itself.
 
 ## Risks / things to verify
 - Max {args.review_bullets} bullets
@@ -360,52 +366,41 @@ For each task, include:
 - If there are no risks, write exactly: "None."
 
 ## Suggested next batch tasks
-- Max {args.review_bullets} bullets
-- Write tasks in the same style as tasks_file lines (short imperative prompts).
-- Prefer tasks that improve weak outputs from above.
+- Output EXACTLY {args.review_bullets} lines.
+- Each line must be a runnable tasks_file line:
+  - No numbering
+  - No bullets
+  - No "Rewrite task:" prefix
+  - If using a file, it MUST start with FILE=<path>
+- Never mention non-existent files. Only use FILE= paths that appear in the digest.
 
 Batch outputs digest (JSON):
 {json.dumps(digests, indent=2)}
 """
-        review_text = generate(review_prompt, stream=False).strip()
-        review_path = outdir / "review.md"
-        review_path.write_text(review_text + "\n", encoding="utf-8")
+        next_prompt = f"""You are a batch-run manager. Create the NEXT batch tasks file.
 
-        # NEW: Auto-generate next_tasks.txt (only after review exists)
-        if args.next_tasks:
-            next_prompt = f"""You are a batch-run manager. Create the NEXT batch tasks file.
-
-Rules:
+Output rules (VERY STRICT):
 - Output plain text ONLY (no markdown).
 - One task per line.
-- No numbering, no bullets.
+- No numbering, no bullets, no "Task:" prefix, no "Rewrite task:" prefix.
 - Max {args.next_tasks_n} lines.
-- Each line must be a runnable task in the same style as tasks files.
-- If a task should use a file, use FILE=<path> at the start of the line (example: FILE=sample.md Summarize in 3 bullets.)
-- Prefer tasks that fix weaknesses mentioned in the review and expand on good outputs.
-- Do NOT invent file names unless they already appear in the digest or review.
-- NEVER output FILE=... unless that exact filename appears in the digest or review.
-- Prefer rewriting tasks to include constraints directly (example: "Summarize in 3 bullets") rather than referring to CLI flags.
+
+Content rules:
+- Each line must be runnable as a tasks_file line.
+- If a line needs a file, it MUST start with FILE=<path> (example: FILE=sample.md Summarize in 3 bullets.)
+- NEVER output FILE=... unless that exact filename appears in the digest or review text.
+- Do NOT invent filenames.
+- Do NOT mention CLI flags like --bullets/--strict/--verify and do NOT use "BULLETS=3".
+- If the file content is short, do NOT demand an impossible number of bullets. Prefer: "List ALL points present" or "Use as many bullets as needed".
+
+Use the review to prioritize fixing failures (missing required count, off-topic drift) before adding new topics.
+
 Review text:
 {review_text}
 
 Batch outputs digest (JSON):
 {json.dumps(digests, indent=2)}
 """
-            next_text = generate(next_prompt, stream=False).strip()
-
-            # Clean up: remove empty lines and accidental bullets/numbers
-            lines = []
-            for line in next_text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                line = re.sub(r"^[-*]\s+", "", line)
-                line = re.sub(r"^\d+\.\s+", "", line)
-                line = re.sub(r"^task:\s*", "", line, flags=re.IGNORECASE)
-                lines.append(line)
-                if len(lines) >= args.next_tasks_n:
-                    break
 
             next_tasks_path = outdir / "next_tasks.txt"
             next_tasks_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
