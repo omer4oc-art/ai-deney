@@ -15,6 +15,15 @@ from run_logger import log_run
 from file_tools import read_text
 
 
+
+CODE_CONTRACT_PY = """Output ONLY valid Python code. No markdown. No prose. No triple backticks.
+Requirements:
+- Include docstring + type hints.
+- Include input validation (raise ValueError/TypeError).
+- If you are unsure about an API, do NOT guess. Prefer the simplest correct approach.
+- If you cannot complete the task, output a Python file that raises RuntimeError explaining what is missing.
+"""
+
 def _slug(s: str, max_len: int = 60) -> str:
     s = s.strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
@@ -190,6 +199,38 @@ def _strip_code_fences(text: str) -> str:
     s = re.sub(r"\n\s*```\s*$", "", s)
     return s.strip() + "\n"
 
+
+def _maybe_run_pytest(project_root: Path) -> tuple[bool, str]:
+    """
+    Runs pytest if tests/ exists and pytest is installed.
+    Returns (ok, message). If skipped, ok=True with a skip message.
+    """
+    tests_dir = project_root / "tests"
+    if not tests_dir.exists():
+        return True, "pytest skipped (no tests/ folder)"
+
+    try:
+        import pytest  # noqa: F401
+    except Exception:
+        return True, "pytest skipped (pytest not installed)"
+
+    env = dict(**__import__("os").environ)
+    # If you use src/ layout, this helps imports like `from ai_deney...`
+    src_dir = project_root / "src"
+    if src_dir.exists():
+        env["PYTHONPATH"] = str(src_dir) + (":" + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
+
+    try:
+        r = subprocess.run(["pytest", "-q"], cwd=str(project_root), env=env, capture_output=True, text=True)
+        if r.returncode == 0:
+            return True, "pytest ok"
+        # include a short tail of output
+        out = (r.stdout + "\n" + r.stderr).strip()
+        tail = "\n".join(out.splitlines()[-25:])
+        return False, "pytest failed:\n" + tail
+    except Exception as e:
+        return False, f"pytest error: {e}"
+
 def main():
     parser = argparse.ArgumentParser(description="Batch runner for your local agent.")
     parser.add_argument("tasks_file", nargs="?", default="", help="Tasks file. Optional if --run-latest-next.")
@@ -271,7 +312,10 @@ def main():
             rel = directive.split(":", 1)[1]
             label = f"{task} (WRITE={rel})"
             try:
-                text = generate(task, stream=False)
+                prompt = task
+                if rel.lower().endswith('.py'):
+                    prompt = CODE_CONTRACT_PY + "\n\n" + task
+                text = generate(prompt, stream=False)
                 if rel.lower().endswith('.py'):
                     text = _strip_code_fences(text)
                 gen_path = _write_generated_file(outdir, rel, text)
@@ -289,6 +333,16 @@ def main():
                 index_lines.append(f"- wrote: `generated/{rel}`")
                 index_lines.append("")
                 produced_files.append((label, gen_path))
+                ok_pytest, msg_pytest = _maybe_run_pytest(Path("."))
+                if not ok_pytest:
+                    warn_path2 = outdir / f"{base}.pytest.warning.txt"
+                    warn_path2.write_text("PYTEST WARNING\n" + msg_pytest + "\n", encoding="utf-8")
+                    index_lines.append(f"- ⚠️ pytest: `{warn_path2.name}`")
+                    index_lines.append("")
+                    log_run({"mode": "batch->pytest", "task": label, "title": "pytest failed", "saved_to": str(warn_path2)})
+                else:
+                    log_run({"mode": "batch->pytest", "task": label, "title": msg_pytest, "saved_to": str(outdir)})
+
                 log_run({"mode": "batch->write", "task": label, "title": f"wrote {rel}", "saved_to": str(gen_path)})
             except Exception as e:
                 err_path = outdir / f"{base}.error.txt"
