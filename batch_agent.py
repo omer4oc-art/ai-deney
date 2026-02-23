@@ -1,4 +1,5 @@
 import argparse
+from email import parser
 import json
 import re
 import shlex
@@ -133,10 +134,25 @@ def topic_guard(task_text: str, output_title: str, output_bullets: list[str]) ->
         return True, f"low keyword overlap ({len(overlap)}/{len(task_keys)}); drift words: {', '.join(drift_hits[:6])}"
     return False, f"ok overlap ({len(overlap)}/{len(task_keys)})"
 
+def _find_latest_next_tasks() -> str:
+    """
+    Finds the newest outputs/batch-*/next_tasks.txt (by folder name timestamp).
+    Returns the path string or "" if none found.
+    """
+    root = Path("outputs")
+    if not root.exists():
+        return ""
+    batches = sorted(root.glob("batch-*"), key=lambda p: p.name, reverse=True)
+    for b in batches:
+        candidate = b / "next_tasks.txt"
+        if candidate.exists():
+            return str(candidate)
+    return ""
 
 def main():
     parser = argparse.ArgumentParser(description="Batch runner for your local agent (supports FILE=... tasks).")
-    parser.add_argument("tasks_file", help="Text file with one task per line (#comments ignored).")
+    parser.add_argument("tasks_file", nargs="?", default="", help="Tasks file path. Optional if --run-latest-next is used.")
+    parser.add_argument("--run-latest-next", action="store_true", help="Run newest outputs/batch-*/next_tasks.txt as the tasks file.")
 
     # Modes
     parser.add_argument("--chat", action="store_true", help="Plain text (chat) mode.")
@@ -166,6 +182,19 @@ def main():
     # Convenience
     parser.add_argument("--open", action="store_true", help="Open index/review/next_tasks in VS Code.")
     args = parser.parse_args()
+
+    # Resolve tasks file
+    if args.run_latest_next and not args.tasks_file:
+        latest = _find_latest_next_tasks()
+        if not latest:
+            print("No next_tasks.txt found. Run a batch with --review --next-tasks first.")
+            return
+        args.tasks_file = latest
+        print(f"Using latest next tasks file: {args.tasks_file}")
+
+    if not args.tasks_file:
+        print("Please provide a tasks_file, or use --run-latest-next.")
+        return
 
     bullets_n = args.bullets if args.bullets and args.bullets > 0 else None
 
