@@ -3,6 +3,7 @@ import json
 import re
 import shlex
 import subprocess
+import os
 import py_compile
 from datetime import datetime
 from pathlib import Path
@@ -319,6 +320,19 @@ def main():
                 if rel.lower().endswith('.py'):
                     text = _strip_code_fences(text)
                 gen_path = _write_generated_file(outdir, rel, text)
+                # Run pytest after generating a .py file (or any write), and log result in index
+                ok_py, msg_py = _maybe_run_pytest(Path("."))
+                if ok_py:
+                    index_lines.append(f"- pytest: {msg_py}")
+                    index_lines.append("")
+                    log_run({"mode": "batch->pytest", "task": label, "title": msg_py, "saved_to": str(outdir)})
+                else:
+                    warn_path2 = outdir / f"{base}.pytest.warning.txt"
+                    warn_path2.write_text("PYTEST WARNING\n" + msg_py + "\n", encoding="utf-8")
+                    index_lines.append(f"- ⚠️ pytest: `{warn_path2.name}`")
+                    index_lines.append("")
+                    log_run({"mode": "batch->pytest", "task": label, "title": "pytest failed", "saved_to": str(warn_path2)})
+
                 # Auto-lint: if we wrote a .py file, run py_compile
                 if gen_path.suffix == ".py":
                     ok, msg = _lint_python_file(gen_path)
