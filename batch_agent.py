@@ -278,14 +278,14 @@ def main():
                     index_lines.append("")
                     log_run({"mode": "batch->error", "task": label, "title": "missing file", "saved_to": str(err_path)})
                     continue
-            except FileNotFoundError as e:
-                err_path = outdir / f"{base}.error.txt"
-                err_path.write_text(str(e) + "\n", encoding="utf-8")
-                index_lines.append(f"## {i}. {label}")
-                index_lines.append(f"- ERROR: `{err_path.name}` (missing file)")
-                index_lines.append("")
-                log_run({"mode": "batch->error", "task": label, "title": "missing file", "saved_to": str(err_path)})
-                continue
+                except FileNotFoundError as e:
+                    err_path = outdir / f"{base}.error.txt"
+                    err_path.write_text(str(e) + "\n", encoding="utf-8")
+                    index_lines.append(f"## {i}. {label}")
+                    index_lines.append(f"- ERROR: `{err_path.name}` (missing file)")
+                    index_lines.append("")
+                    log_run({"mode": "batch->error", "task": label, "title": "missing file", "saved_to": str(err_path)})
+                    continue
 
         try:
             if mode == "chat":
