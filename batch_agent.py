@@ -36,6 +36,14 @@ def _parse_task_line(line: str) -> tuple[str | None, str]:
     if not parts:
         return None, ""
 
+    if parts[0].startswith("WRITE="):
+        write_path = parts[0].split("=", 1)[1].strip()
+        if write_path.endswith(":"):
+            write_path = write_path[:-1]
+        task_text = " ".join(parts[1:]).strip() or "Write the requested file."
+        # return write path in file_path slot, prefixed to distinguish
+        return "WRITE:" + write_path, task_text
+
     if parts[0].startswith("FILE="):
         file_path = parts[0].split("=", 1)[1].strip()
         # tolerate accidental trailing colon: FILE=foo.md:
@@ -150,6 +158,16 @@ def topic_guard(task_text: str, output_title: str, output_bullets: list[str]) ->
     return False, f"ok overlap ({len(overlap)}/{len(task_keys)})"
 
 
+
+def _write_generated_file(outdir: Path, rel_path: str, content: str) -> Path:
+    """Write generated content under outdir/generated/<rel_path>."""
+    safe_rel = rel_path.strip().lstrip("/").replace("..", "_")
+    gen_root = outdir / "generated"
+    target = gen_root / safe_rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content.rstrip() + "\n", encoding="utf-8")
+    return target
+
 def main():
     parser = argparse.ArgumentParser(description="Batch runner for your local agent (supports FILE=... tasks).")
 
@@ -243,10 +261,23 @@ def main():
 
         # Inject file content per task (UPGRADE: skip missing files without crashing)
         full_task = task
+        write_target = None
         if file_path:
-            try:
-                file_text = read_text(file_path)
-                full_task = full_task + "\n\n[FILE CONTENT]\n" + file_text
+            # WRITE tasks: model generates file content
+            if isinstance(file_path, str) and file_path.startswith("WRITE:"):
+                write_target = file_path.split(":", 1)[1]
+            else:
+                try:
+                    file_text = read_text(file_path)
+                    full_task = full_task + "\n\n[FILE CONTENT]\n" + file_text
+                except FileNotFoundError as e:
+                    err_path = outdir / f"{base}.error.txt"
+                    err_path.write_text(str(e) + "\n", encoding="utf-8")
+                    index_lines.append(f"## {i}. {label}")
+                    index_lines.append(f"- ERROR: `{err_path.name}` (missing file)")
+                    index_lines.append("")
+                    log_run({"mode": "batch->error", "task": label, "title": "missing file", "saved_to": str(err_path)})
+                    continue
             except FileNotFoundError as e:
                 err_path = outdir / f"{base}.error.txt"
                 err_path.write_text(str(e) + "\n", encoding="utf-8")
@@ -271,6 +302,15 @@ def main():
                 index_lines.append("")
 
                 produced_files.append((label, saved_path))
+
+            # If this task requested writing a file, write it under outdir/generated/
+            if write_target:
+                # Use chat mode for file generation to avoid JSON constraints
+                file_text_out = generate(full_task, stream=False)
+                gen_path = _write_generated_file(outdir, write_target, file_text_out)
+                index_lines.append(f"- wrote: `generated/{write_target}`")
+                index_lines.append("")
+                log_run({"mode": "batch->write", "task": label, "title": f"wrote {write_target}", "saved_to": str(gen_path)})
                 log_run({"mode": "batch->chat", "task": label, "title": text[:60], "saved_to": str(saved_path)})
                 continue
 
@@ -295,6 +335,15 @@ def main():
             index_lines.append("")
 
             produced_files.append((label, saved_path))
+
+            # If this task requested writing a file, write it under outdir/generated/
+            if write_target:
+                # Use chat mode for file generation to avoid JSON constraints
+                file_text_out = generate(full_task, stream=False)
+                gen_path = _write_generated_file(outdir, write_target, file_text_out)
+                index_lines.append(f"- wrote: `generated/{write_target}`")
+                index_lines.append("")
+                log_run({"mode": "batch->write", "task": label, "title": f"wrote {write_target}", "saved_to": str(gen_path)})
 
             # Topic guard (ONLY for structured outputs)
             if args.topic_guard:
