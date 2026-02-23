@@ -175,6 +175,21 @@ def _lint_python_file(py_path: Path) -> tuple[bool, str]:
     except Exception as e:
         return False, str(e)
 
+
+def _strip_code_fences(text: str) -> str:
+    """
+    Remove common markdown code fences from model output.
+    Handles:
+      ```python
+      ...
+      ```
+    and ``` ... ```
+    """
+    s = text.strip()
+    s = re.sub(r"^\s*```[a-zA-Z0-9_-]*\s*\n", "", s)
+    s = re.sub(r"\n\s*```\s*$", "", s)
+    return s.strip() + "\n"
+
 def main():
     parser = argparse.ArgumentParser(description="Batch runner for your local agent.")
     parser.add_argument("tasks_file", nargs="?", default="", help="Tasks file. Optional if --run-latest-next.")
@@ -257,6 +272,8 @@ def main():
             label = f"{task} (WRITE={rel})"
             try:
                 text = generate(task, stream=False)
+                if rel.lower().endswith('.py'):
+                    text = _strip_code_fences(text)
                 gen_path = _write_generated_file(outdir, rel, text)
                 # Auto-lint: if we wrote a .py file, run py_compile
                 if gen_path.suffix == ".py":
