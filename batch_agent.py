@@ -3,6 +3,7 @@ import json
 import re
 import shlex
 import subprocess
+import py_compile
 from datetime import datetime
 from pathlib import Path
 
@@ -165,6 +166,15 @@ def topic_guard(task_text: str, output_title: str, output_bullets: list[str]) ->
     return False, f"ok overlap ({len(overlap)}/{len(task_keys)})"
 
 
+
+def _lint_python_file(py_path: Path) -> tuple[bool, str]:
+    """Return (ok, message)."""
+    try:
+        py_compile.compile(str(py_path), doraise=True)
+        return True, "py_compile ok"
+    except Exception as e:
+        return False, str(e)
+
 def main():
     parser = argparse.ArgumentParser(description="Batch runner for your local agent.")
     parser.add_argument("tasks_file", nargs="?", default="", help="Tasks file. Optional if --run-latest-next.")
@@ -248,6 +258,16 @@ def main():
             try:
                 text = generate(task, stream=False)
                 gen_path = _write_generated_file(outdir, rel, text)
+                # Auto-lint: if we wrote a .py file, run py_compile
+                if gen_path.suffix == ".py":
+                    ok, msg = _lint_python_file(gen_path)
+                    if not ok:
+                        warn_path = outdir / f"{base}.warning.txt"
+                        warn_path.write_text("PYTHON SYNTAX WARNING\n" + msg + "\n", encoding="utf-8")
+                        index_lines.append(f"- ⚠️ python syntax: `{warn_path.name}`")
+                        index_lines.append("")
+                        log_run({"mode": "batch->lint_warning", "task": label, "title": "py_compile failed", "saved_to": str(warn_path)})
+
                 index_lines.append(f"## {i}. {label}")
                 index_lines.append(f"- wrote: `generated/{rel}`")
                 index_lines.append("")
