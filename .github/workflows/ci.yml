@@ -39,6 +39,34 @@ jobs:
       - name: Run Deterministic Eval Pack
         run: bash scripts/run_eval_pack.sh
 
+      - name: Collect CI Context
+        if: always()
+        run: |
+          mkdir -p outputs/ci_context
+          {
+            echo "# taskfiles"
+            find tests/_tmp_tasks -type f -name "*.md" 2>/dev/null || true
+            find tests/eval_pack/tasks -maxdepth 1 -type f -name "*.md" 2>/dev/null || true
+          } > outputs/ci_context/taskfiles.txt
+
+      - name: Upload CI Debug Artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-debug-artifacts
+          if-no-files-found: ignore
+          path: |
+            .pytest_cache/**
+            outputs/ci_context/taskfiles.txt
+            outputs/_smoke_*/**
+            outputs/**/index.md
+            outputs/**/gate_report.json
+            outputs/**/transcript.jsonl
+            outputs/**/bundle.txt
+            outputs/**/pytest.log
+            tests/_tmp_tasks/**/*.md
+            tests/eval_pack/tasks/*.md
+
   real_lane:
     if: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_real_lane == 'true') || env.RUN_REAL_LANE == '1' }}
     runs-on: ubuntu-latest

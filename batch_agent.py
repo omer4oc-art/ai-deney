@@ -7,6 +7,7 @@ import subprocess
 import os
 import py_compile
 import traceback
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,8 @@ _KNOWN_STUB_FIXTURES = {
     "dupdef_then_good",
     "tidy_weird_then_good",
 }
+
+_TRANSCRIPT_MANAGER = None
 
 
 def _live_generate(prompt: str, stream: bool = False) -> str:
@@ -81,7 +84,212 @@ def _stub_model_generate(fixture: str, attempt: int) -> str:
     raise ValueError(f"unknown --stub-model fixture: {fixture}")
 
 
-def _generate_adapter(prompt: str, stream: bool = False, attempt: int = 0) -> str:
+def _short_prompt(text: str, n: int = 120) -> str:
+    s = (text or "").strip().replace("\n", "\\n")
+    return s[:n]
+
+
+class _TranscriptManager:
+    def __init__(
+        self,
+        outdir: Path,
+        record: bool = False,
+        replay_path: str = "",
+        replay_strict: bool = True,
+    ) -> None:
+        self.outdir = outdir
+        self.record = bool(record)
+        self.replay_path = Path(replay_path) if replay_path else None
+        self.replay_strict = bool(replay_strict)
+        self.call_index = 0
+        self.warning_path = outdir / "replay.warnings.txt"
+        self.prompt_dir = outdir / "transcript" / "prompts"
+        self.response_dir = outdir / "transcript" / "responses"
+        self.jsonl_path = outdir / "transcript.jsonl"
+        self.entries: list[dict] = []
+        self.replay_base_dir: Path | None = None
+        self.replay_pos = 0
+        if self.record:
+            self.prompt_dir.mkdir(parents=True, exist_ok=True)
+            self.response_dir.mkdir(parents=True, exist_ok=True)
+        if self.replay_path:
+            if not self.replay_path.exists():
+                raise RuntimeError(f"replay transcript not found: {self.replay_path}")
+            self.replay_base_dir = self.replay_path.parent
+            for raw in self.replay_path.read_text(encoding="utf-8").splitlines():
+                s = raw.strip()
+                if not s:
+                    continue
+                self.entries.append(json.loads(s))
+            if not self.entries:
+                raise RuntimeError(f"replay transcript is empty: {self.replay_path}")
+
+    def _write_warning(self, msg: str) -> None:
+        try:
+            self.warning_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.warning_path.open("a", encoding="utf-8") as f:
+                f.write(msg.rstrip() + "\n")
+        except Exception:
+            pass
+
+    def _load_prompt_from_entry(self, entry: dict) -> str:
+        if not self.replay_base_dir:
+            return ""
+        rel = str(entry.get("prompt_path", "")).strip()
+        if not rel:
+            return ""
+        p = self.replay_base_dir / rel
+        try:
+            return p.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    def _load_response_from_entry(self, entry: dict) -> str:
+        if not self.replay_base_dir:
+            return ""
+        rel = str(entry.get("response_path", "")).strip()
+        if not rel:
+            return ""
+        p = self.replay_base_dir / rel
+        return p.read_text(encoding="utf-8")
+
+    def _find_entry(self, prompt_hash: str, prompt_text: str) -> dict:
+        if self.replay_pos >= len(self.entries):
+            raise RuntimeError(
+                f"REPLAY_EXHAUSTED: no transcript entries left for hash={prompt_hash}"
+            )
+        if self.replay_strict:
+            entry = self.entries[self.replay_pos]
+            exp_hash = str(entry.get("prompt_hash", "")).strip()
+            if exp_hash != prompt_hash:
+                exp_prompt = self._load_prompt_from_entry(entry)
+                raise RuntimeError(
+                    "REPLAY_PROMPT_MISMATCH: "
+                    f"expected_hash={exp_hash} got_hash={prompt_hash}\n"
+                    f"expected_prompt={_short_prompt(exp_prompt)}\n"
+                    f"got_prompt={_short_prompt(prompt_text)}"
+                )
+            self.replay_pos += 1
+            return entry
+
+        j = self.replay_pos
+        while j < len(self.entries):
+            entry = self.entries[j]
+            if str(entry.get("prompt_hash", "")).strip() == prompt_hash:
+                if j != self.replay_pos:
+                    self._write_warning(
+                        f"REPLAY_NON_STRICT_SKIP from={self.replay_pos} to={j} hash={prompt_hash}"
+                    )
+                self.replay_pos = j + 1
+                return entry
+            j += 1
+        raise RuntimeError(f"REPLAY_NO_MATCH: hash={prompt_hash}")
+
+    def run_call(
+        self,
+        prompt: str,
+        stream: bool,
+        attempt: int,
+        task_index: int,
+        directive: str,
+        target: str,
+        mode: str,
+        contract: str,
+    ) -> tuple[str, str]:
+        self.call_index += 1
+        call_idx = self.call_index
+        ts = datetime.now().isoformat()
+        prompt_text = prompt or ""
+        prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+        provider = "ollama"
+
+        if self.replay_path:
+            entry = self._find_entry(prompt_hash, prompt_text)
+            response = self._load_response_from_entry(entry)
+            provider = "replay"
+            if self.record:
+                self._record_entry(
+                    call_idx, task_index, directive, target, attempt, mode, contract,
+                    prompt_hash, prompt_text, response, provider, ts,
+                )
+            return response, provider
+
+        if _STUB_MODEL_FIXTURE:
+            provider = "stub"
+            response = _stub_model_generate(_STUB_MODEL_FIXTURE, attempt)
+        else:
+            provider = "ollama"
+            response = generate(prompt_text, stream=stream)
+
+        if self.record:
+            self._record_entry(
+                call_idx, task_index, directive, target, attempt, mode, contract,
+                prompt_hash, prompt_text, response, provider, ts,
+            )
+        return response, provider
+
+    def _record_entry(
+        self,
+        call_index: int,
+        task_index: int,
+        directive: str,
+        target: str,
+        attempt: int,
+        mode: str,
+        contract: str,
+        prompt_hash: str,
+        prompt_text: str,
+        response_text: str,
+        provider: str,
+        timestamp: str,
+    ) -> None:
+        prompt_rel = Path("transcript") / "prompts" / f"{prompt_hash}.txt"
+        response_rel = Path("transcript") / "responses" / f"{call_index}.txt"
+        prompt_path = self.outdir / prompt_rel
+        response_path = self.outdir / response_rel
+        if not prompt_path.exists():
+            prompt_path.write_text(prompt_text, encoding="utf-8")
+        response_path.write_text(response_text, encoding="utf-8")
+        row = {
+            "call_index": call_index,
+            "task_index": int(task_index),
+            "directive": directive,
+            "target": target,
+            "attempt": int(attempt),
+            "mode": mode,
+            "contract": contract or "none",
+            "prompt_hash": prompt_hash,
+            "prompt_path": prompt_rel.as_posix(),
+            "response_path": response_rel.as_posix(),
+            "provider": provider,
+            "timestamp": timestamp,
+        }
+        with self.jsonl_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _generate_adapter(
+    prompt: str,
+    stream: bool = False,
+    attempt: int = 0,
+    task_index: int = 0,
+    directive: str = "TASK",
+    target: str = "",
+    mode: str = "",
+    contract: str = "none",
+) -> str:
+    if _TRANSCRIPT_MANAGER is not None:
+        text, _provider = _TRANSCRIPT_MANAGER.run_call(
+            prompt=prompt,
+            stream=stream,
+            attempt=attempt,
+            task_index=task_index,
+            directive=directive,
+            target=target,
+            mode=mode,
+            contract=contract,
+        )
+        return text
     if _STUB_MODEL_FIXTURE:
         return _stub_model_generate(_STUB_MODEL_FIXTURE, attempt)
     return generate(prompt, stream=stream)
@@ -661,6 +869,10 @@ def _generate_python_with_repair(
     max_repairs: int,
     initial_text: str = "",
     extra_gate=None,
+    task_index: int = 0,
+    directive: str = "WRITE",
+    mode: str = "",
+    contract: str = "none",
 ) -> tuple[str, bool, str, int, str]:
     """
     Generate python and auto-repair on quality failures.
@@ -689,7 +901,18 @@ def _generate_python_with_repair(
         summary_parts.append(f"attempt 0: {','.join(c) if c else 'UNKNOWN_FAILURE'}")
     else:
         full_prompt = CODE_CONTRACT_PY + "\n\n" + prompt
-        candidate = _strip_code_fences(_generate_adapter(full_prompt, stream=False, attempt=0))
+        candidate = _strip_code_fences(
+            _generate_adapter(
+                full_prompt,
+                stream=False,
+                attempt=0,
+                task_index=task_index,
+                directive=directive,
+                target=rel_path,
+                mode=mode,
+                contract=contract,
+            )
+        )
         model_calls += 1
         ok, failures = _evaluate_python_quality_text(
             text=candidate,
@@ -717,7 +940,18 @@ def _generate_python_with_repair(
             "Previous output:\n"
             f"{last_text}"
         )
-        candidate = _strip_code_fences(_generate_adapter(repair_prompt, stream=False, attempt=repair_ix))
+        candidate = _strip_code_fences(
+            _generate_adapter(
+                repair_prompt,
+                stream=False,
+                attempt=repair_ix,
+                task_index=task_index,
+                directive=directive,
+                target=rel_path,
+                mode=mode,
+                contract=contract,
+            )
+        )
         model_calls += 1
         ok, failures = _evaluate_python_quality_text(
             text=candidate,
@@ -839,7 +1073,7 @@ def _write_gate_report(path: Path, report: dict) -> None:
     except Exception:
         pass
 def main():
-    global _STUB_MODEL_FIXTURE
+    global _STUB_MODEL_FIXTURE, _TRANSCRIPT_MANAGER
     parser = argparse.ArgumentParser(description="Batch runner for your local agent.")
     parser.add_argument("tasks_file", nargs="?", default="", help="Tasks file. Optional if --run-latest-next.")
     parser.add_argument("--run-latest-next", action="store_true", help="Use newest outputs/batch-*/next_tasks.txt.")
@@ -858,6 +1092,10 @@ def main():
     parser.add_argument("--format", choices=["json", "md"], default="md", help="Output format for JSON/memory/chat task outputs (not task-file parsing).")
     parser.add_argument("--tasks-format", choices=["lines", "blocks"], default="blocks", help="How to parse tasks file input.")
     parser.add_argument("--stub-model", default="", help="Deterministic local fixture model (disables live model calls).")
+    parser.add_argument("--record-transcript", action="store_true", help="Record model prompts/responses to outdir transcript files.")
+    parser.add_argument("--replay-transcript", default="", help="Replay model responses from transcript.jsonl.")
+    parser.add_argument("--replay-strict", action="store_true", default=True, help="Strict replay prompt-hash matching (default: on).")
+    parser.add_argument("--no-replay-strict", action="store_false", dest="replay_strict", help="Allow non-strict replay (scan ahead for matching prompt hash).")
 
     parser.add_argument("--review", action="store_true", help="Generate review.md.")
     parser.add_argument("--review-bullets", type=int, default=7, help="Bullets per section in review.")
@@ -894,6 +1132,17 @@ def main():
         outdir = Path(f"outputs/batch-{ts}")
     outdir.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now().isoformat()
+    _TRANSCRIPT_MANAGER = None
+    try:
+        _TRANSCRIPT_MANAGER = _TranscriptManager(
+            outdir=outdir,
+            record=bool(args.record_transcript),
+            replay_path=(args.replay_transcript or ""),
+            replay_strict=bool(args.replay_strict),
+        )
+    except Exception as e:
+        print(f"transcript setup failed: {e}")
+        raise SystemExit(1)
 
     try:
         tasks = _load_tasks(args.tasks_file, tasks_format=args.tasks_format)
@@ -977,6 +1226,10 @@ def main():
                                     max_repairs=args.repair_retries,
                                     initial_text=content,
                                     extra_gate=_ast_quality_gate_text,
+                                    task_index=i,
+                                    directive="WRITE_RAW",
+                                    mode=mode,
+                                    contract=py_contract or "none",
                                 )
                                 if ok_repair:
                                     content = repaired
@@ -1037,6 +1290,10 @@ def main():
                             forbid=forbids,
                             max_repairs=args.repair_retries,
                             extra_gate=_ast_quality_gate_text,
+                            task_index=i,
+                            directive="WRITE_BLOCK",
+                            mode=mode,
+                            contract=py_contract or "none",
                         )
                         if not ok_repair:
                             err_path = outdir / f"{base}.semantic.error.txt"
@@ -1052,7 +1309,16 @@ def main():
                             _flush_index(outdir, index_lines)
                             raise SystemExit(1)
                     else:
-                        text = _generate_adapter(actual_prompt, stream=False, attempt=0)
+                        text = _generate_adapter(
+                            actual_prompt,
+                            stream=False,
+                            attempt=0,
+                            task_index=i,
+                            directive="WRITE_BLOCK",
+                            target=rel,
+                            mode=mode,
+                            contract=py_contract or "none",
+                        )
                         ok_expect, msg_expect = _expectations_gate_text(text, must_contains, forbids)
                         if not ok_expect:
                             err_path = outdir / f"{base}.semantic.error.txt"
@@ -1116,6 +1382,10 @@ def main():
                             forbid=contract_forbid,
                             max_repairs=args.repair_retries,
                             extra_gate=_ast_quality_gate_text,
+                            task_index=i,
+                            directive="WRITE",
+                            mode=mode,
+                            contract=py_contract or "none",
                         )
                         if not ok_repair:
                             err_path = outdir / f"{base}.semantic.error.txt"
@@ -1131,7 +1401,16 @@ def main():
                             _flush_index(outdir, index_lines)
                             raise SystemExit(1)
                     else:
-                        text = _generate_adapter(write_task, stream=False, attempt=0)
+                        text = _generate_adapter(
+                            write_task,
+                            stream=False,
+                            attempt=0,
+                            task_index=i,
+                            directive="WRITE",
+                            target=rel,
+                            mode=mode,
+                            contract=py_contract or "none",
+                        )
 
                     gen_path = _write_generated_file(outdir, rel, text)
                     if gen_path.suffix == ".py":
@@ -1189,7 +1468,18 @@ def main():
     
             try:
                 if mode == "chat":
-                    text = _generate_adapter(full_task, stream=False, attempt=0)
+                    eff_directive = directive.split(":", 1)[0] if isinstance(directive, str) else "TASK"
+                    eff_target = directive.split(":", 1)[1] if isinstance(directive, str) and ":" in directive else ""
+                    text = _generate_adapter(
+                        full_task,
+                        stream=False,
+                        attempt=0,
+                        task_index=i,
+                        directive=eff_directive,
+                        target=eff_target,
+                        mode=mode,
+                        contract="none",
+                    )
                     saved_path = outdir / f"{base}.txt"
                     saved_path.write_text(text.strip() + "\n", encoding="utf-8")
                     index_lines.append(f"## {i}. {label}")
@@ -1322,7 +1612,16 @@ Format:
 Digest:
 {json.dumps(digests, indent=2)}
 """
-            review_text = _generate_adapter(review_prompt, stream=False, attempt=0).strip() + "\n"
+            review_text = _generate_adapter(
+                review_prompt,
+                stream=False,
+                attempt=0,
+                task_index=0,
+                directive="REVIEW",
+                target="review.md",
+                mode="review",
+                contract="none",
+            ).strip() + "\n"
 
         review_path = outdir / "review.md"
         review_path.write_text(review_text, encoding="utf-8")
@@ -1346,7 +1645,16 @@ Review text:
 Digest:
 {json.dumps(digests, indent=2)}
 """
-            nxt = _generate_adapter(next_prompt, stream=False, attempt=0).strip()
+            nxt = _generate_adapter(
+                next_prompt,
+                stream=False,
+                attempt=0,
+                task_index=0,
+                directive="NEXT_TASKS",
+                target="next_tasks.txt",
+                mode="review",
+                contract="none",
+            ).strip()
             lines = []
             for line in nxt.splitlines():
                 line = line.strip()

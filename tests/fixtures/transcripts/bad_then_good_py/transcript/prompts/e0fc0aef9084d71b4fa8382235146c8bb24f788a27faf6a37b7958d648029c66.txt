@@ -1,0 +1,10 @@
+Output ONLY valid Python code. No markdown. No prose. No triple backticks.
+Requirements:
+- Include docstring + type hints.
+- Include input validation (raise ValueError/TypeError).
+- If you are unsure about an API, do NOT guess. Prefer the simplest correct approach.
+- If you cannot complete the task, output a Python file that raises RuntimeError explaining what is missing.
+
+
+PROMPT:
+Write ok() -> int returning 1.

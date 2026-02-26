@@ -36,6 +36,21 @@ patch_*.py
 tasks_day*.txt
 random_*.py
 
+# keep only this debugging guide under docs/
+!docs/
+docs/*
+!docs/DEBUGGING.md
+
+# keep only this debugging guide under docs/
+!docs/
+docs/*
+!docs/DEBUGGING.md
+
+# keep only this debugging guide under docs/
+!docs/
+docs/*
+!docs/DEBUGGING.md
+
 # --- local artifacts ---
 outputs/
 archive/
@@ -56,3 +71,8 @@ docs/
 patch_*.py
 tasks_day*.txt
 random_*.py
+
+# keep only this debugging guide under docs/
+!docs/
+docs/*
+!docs/DEBUGGING.md

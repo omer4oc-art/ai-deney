@@ -1,0 +1,3 @@
+def ok() -> int:
+    # TODO: cleanup
+    return 1

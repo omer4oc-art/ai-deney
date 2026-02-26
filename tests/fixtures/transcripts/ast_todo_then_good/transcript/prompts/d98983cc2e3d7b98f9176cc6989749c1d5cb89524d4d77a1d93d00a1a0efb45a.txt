@@ -1,0 +1,23 @@
+Output ONLY valid Python code. No markdown. No prose. No triple backticks.
+Requirements:
+- Include docstring + type hints.
+- Include input validation (raise ValueError/TypeError).
+- If you are unsure about an API, do NOT guess. Prefer the simplest correct approach.
+- If you cannot complete the task, output a Python file that raises RuntimeError explaining what is missing.
+
+
+Original prompt:
+PROMPT:
+Write ok() -> int returning 1.
+
+Target file path: outputs/_smoke_agent_quality/replay_fixture_ok.py
+Previous output failed quality gates.
+Failure reasons (machine-readable):
+AST_TODO_FOUND
+
+Return ONLY valid Python code. No markdown fences. No commentary.
+
+Previous output:
+def ok() -> int:
+    # TODO: cleanup
+    return 1
