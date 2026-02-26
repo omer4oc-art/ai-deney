@@ -69,3 +69,64 @@ def test_run_batches_creates_summary_and_batch_dirs(tmp_path: Path) -> None:
     assert "gate_report.json" in md_text
     batch_dirs = sorted([p for p in outbase.iterdir() if p.is_dir() and p.name.startswith("batch_")])
     assert len(batch_dirs) == 2
+
+
+def test_run_batches_fail_fast_and_continue_on_fail(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    tasks_dir = repo_root / "tests" / "_tmp_tasks" / "run_batches_fail_modes"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "a_fail.md").write_text(
+        "WRITE_RAW: outputs/_smoke_agent_quality/fail_raw.py\n"
+        "def x(:\n"
+        "    pass\n"
+        "END_WRITE_RAW\n",
+        encoding="utf-8",
+    )
+    (tasks_dir / "b_ok.md").write_text(
+        "WRITE_BLOCK: outputs/_smoke_agent_quality/ok_after_fail.py\n"
+        "PROMPT:\n"
+        "Write ok() -> int returning 1.\n"
+        "END_WRITE_BLOCK\n",
+        encoding="utf-8",
+    )
+
+    out_fast = tmp_path / "out_fast"
+    p_fast = subprocess.run(
+        [
+            "python3",
+            "scripts/run_batches.py",
+            str(tasks_dir),
+            "--outbase",
+            str(out_fast),
+            "--stub-model",
+            "good_py_add",
+        ],
+        cwd=str(repo_root),
+        env=_safe_env(),
+        capture_output=True,
+        text=True,
+    )
+    assert p_fast.returncode != 0
+    fast_dirs = sorted([p for p in out_fast.iterdir() if p.is_dir() and p.name.startswith("batch_")])
+    assert len(fast_dirs) == 1
+
+    out_continue = tmp_path / "out_continue"
+    p_cont = subprocess.run(
+        [
+            "python3",
+            "scripts/run_batches.py",
+            str(tasks_dir),
+            "--outbase",
+            str(out_continue),
+            "--stub-model",
+            "good_py_add",
+            "--continue-on-fail",
+        ],
+        cwd=str(repo_root),
+        env=_safe_env(),
+        capture_output=True,
+        text=True,
+    )
+    assert p_cont.returncode != 0
+    cont_dirs = sorted([p for p in out_continue.iterdir() if p.is_dir() and p.name.startswith("batch_")])
+    assert len(cont_dirs) == 2

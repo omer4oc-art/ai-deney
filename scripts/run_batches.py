@@ -96,7 +96,9 @@ def main() -> int:
     ap.add_argument("--repair-retries", type=int, default=0)
     ap.add_argument("--record-transcript", action="store_true")
     ap.add_argument("--bundle", action="store_true")
-    ap.add_argument("--continue-on-fail", action="store_true")
+    fail_mode = ap.add_mutually_exclusive_group()
+    fail_mode.add_argument("--continue-on-fail", action="store_true", help="Run all batches even if a batch fails.")
+    fail_mode.add_argument("--fail-fast", action="store_true", help="Stop immediately when a batch fails (default behavior).")
     ap.add_argument("--html", action="store_true")
     args = ap.parse_args()
 
@@ -111,6 +113,8 @@ def main() -> int:
     batches: list[dict] = []
     agg_gate_counts: dict[str, int] = {k: 0 for k in KNOWN_GATE_KEYS}
     any_fail = False
+
+    stop_on_fail = args.fail_fast or (not args.continue_on_fail)
 
     for idx, tf in enumerate(task_files, start=1):
         outdir = outbase / f"batch_{idx:03d}_{_slug(tf.stem)}"
@@ -155,7 +159,7 @@ def main() -> int:
             "stderr_tail": "\n".join((p.stderr or "").splitlines()[-20:]),
         }
         batches.append(rec)
-        if code != 0 and not args.continue_on_fail:
+        if code != 0 and stop_on_fail:
             break
 
     summary_json = {

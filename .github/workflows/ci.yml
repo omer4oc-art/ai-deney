@@ -13,6 +13,19 @@ on:
         options:
           - "false"
           - "true"
+      run_release_checks:
+        description: "Run release dry-run checks"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      release_tag:
+        description: "Release tag for dry-run validation"
+        required: false
+        default: "v0.0.0"
+        type: string
 
 jobs:
   test:
@@ -88,3 +101,28 @@ jobs:
 
       - name: Run Real Eval Lane
         run: python -m pytest -q tests/eval_pack_real
+
+  release_checks:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_release_checks == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          python -m pip install -U pytest
+
+      - name: Run Release Checks
+        run: |
+          bash scripts/check.sh
+          bash scripts/run_eval_pack.sh
+          bash scripts/release.sh --tag "${{ inputs.release_tag }}" --dry-run
