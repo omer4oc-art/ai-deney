@@ -1,0 +1,77 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      run_real_lane:
+        description: "Run optional real lane on self-hosted ollama runner"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  nightly_stub_soak:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          python -m pip install -U pytest
+
+      - name: Run Nightly Stub Soak
+        run: bash scripts/soak_eval_pack.sh --minutes 10 --sleep-seconds 1 --max-runs-kept 50 --no-stop-on-fail
+
+      - name: Find Latest Soak Dir
+        id: latest
+        if: always()
+        run: |
+          latest="$(ls -1dt outputs/soak_runs/* 2>/dev/null | head -n 1 || true)"
+          echo "path=$latest" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Nightly Soak Artifacts
+        if: always() && steps.latest.outputs.path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-soak-artifacts
+          if-no-files-found: ignore
+          path: |
+            ${{ steps.latest.outputs.path }}/soak_summary.jsonl
+            ${{ steps.latest.outputs.path }}/runs/*/pytest.log
+            ${{ steps.latest.outputs.path }}/runs/*/gate_report.json
+
+  nightly_real_lane:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_lane == 'true' }}
+    runs-on: [self-hosted, ollama]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          python -m pip install -U pytest
+
+      - name: Run Real Lane
+        run: python -m pytest -q tests/eval_pack_real

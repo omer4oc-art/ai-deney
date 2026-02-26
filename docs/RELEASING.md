@@ -42,3 +42,13 @@ Push manually when ready:
 git push
 git push origin vX.Y.Z
 ```
+
+## Create GitHub Release
+1. Open GitHub repository page.
+2. Go to `Releases` and click `Draft a new release`.
+3. Select tag `vX.Y.Z`.
+4. Generate notes locally and paste them into release notes:
+
+```bash
+bash scripts/release_notes.sh vX.Y.Z
+```

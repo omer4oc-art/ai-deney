@@ -4,6 +4,7 @@
 - Open GitHub Actions.
 - Open the failed run.
 - Download artifact: `ci-debug-artifacts`.
+- For nightly soak runs, open the `Nightly` workflow run and download `nightly-soak-artifacts`.
 
 ## High-Value Files
 - `index.md`: per-task status and errors.
