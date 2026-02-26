@@ -76,3 +76,5 @@ random_*.py
 !docs/
 docs/*
 !docs/DEBUGGING.md
+!docs/RELEASING.md
+outputs/
