@@ -1,7 +1,4 @@
-# Week 1
-
-## Setup Log
-- Homebrew installed
-- VS Code installed
-- Ollama installed + llama3.1:8b downloaded
-- Python venv created (3.14.3)
+# Week1 Notes
+- Installed Homebrew, VS Code, Ollama
+- Built agent.py with memory + logging
+- Added strict + verify modes

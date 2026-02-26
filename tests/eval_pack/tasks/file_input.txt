@@ -1,0 +1,1 @@
+This is sample input content for FILE directive eval coverage.

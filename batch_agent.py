@@ -1,16 +1,15 @@
 import argparse
+import ast
 import json
 import re
 import shlex
 import subprocess
 import os
 import py_compile
+import traceback
 from datetime import datetime
 from pathlib import Path
 
-from ollama_client import generate, OllamaNotRunning
-from agent_json import run as run_json_agent
-from memory_agent import run as run_memory_agent
 from memory import memory_as_context
 from run_logger import log_run
 from file_tools import read_text
@@ -24,6 +23,78 @@ Requirements:
 - If you are unsure about an API, do NOT guess. Prefer the simplest correct approach.
 - If you cannot complete the task, output a Python file that raises RuntimeError explaining what is missing.
 """
+PY_CONTRACT_MARKER = "__PY_CONTRACT__:"
+_STUB_MODEL_FIXTURE = ""
+_KNOWN_STUB_FIXTURES = {
+    "good_py_add",
+    "bad_then_good_py",
+    "ast_todo_then_good",
+    "dupdef_then_good",
+    "tidy_weird_then_good",
+}
+
+
+def _live_generate(prompt: str, stream: bool = False) -> str:
+    from ollama_client import generate as _ollama_generate
+    return _ollama_generate(prompt, stream=stream)
+
+
+def generate(prompt: str, stream: bool = False) -> str:
+    # Compatibility wrapper used by existing tests that monkeypatch `batch_agent.generate`.
+    return _live_generate(prompt, stream=stream)
+
+
+def _stub_model_generate(fixture: str, attempt: int) -> str:
+    fx = (fixture or "").strip()
+    a = max(0, int(attempt or 0))
+    if fx == "good_py_add":
+        return "def add(a: int, b: int) -> int:\n    return a + b\n"
+    if fx == "bad_then_good_py":
+        if a == 0:
+            return "def x(:\n    pass\n"
+        return "def ok() -> int:\n    return 1\n"
+    if fx == "ast_todo_then_good":
+        if a == 0:
+            return "def ok() -> int:\n    # TODO: cleanup\n    return 1\n"
+        return "def ok() -> int:\n    return 1\n"
+    if fx == "dupdef_then_good":
+        if a == 0:
+            return (
+                "def ok() -> int:\n"
+                "    return 1\n"
+                "# def ok():\n"
+                "#     raise RuntimeError('cannot')\n"
+            )
+        return "def ok() -> int:\n    return 1\n"
+    if fx == "tidy_weird_then_good":
+        if a == 0:
+            return (
+                "def ok() -> int:\n"
+                "    if not True:\n"
+                "        return 0\n"
+                "    if not isinstance((), tuple):\n"
+                "        return -1\n"
+                "    x = 'never be reached'\n"
+                "    return 1\n"
+            )
+        return "def ok() -> int:\n    return 1\n"
+    raise ValueError(f"unknown --stub-model fixture: {fixture}")
+
+
+def _generate_adapter(prompt: str, stream: bool = False, attempt: int = 0) -> str:
+    if _STUB_MODEL_FIXTURE:
+        return _stub_model_generate(_STUB_MODEL_FIXTURE, attempt)
+    return generate(prompt, stream=stream)
+
+
+def _run_json_agent_adapter(task: str, strict: bool, verify: bool, bullets_n: int | None):
+    from agent_json import run as _run_json
+    return _run_json(task, strict=strict, verify=verify, bullets_n=bullets_n)
+
+
+def _run_memory_agent_adapter(task: str, context: str):
+    from memory_agent import run as _run_memory
+    return _run_memory(task, context=context)
 
 def _slug(s: str, max_len: int = 60) -> str:
     s = s.strip().lower()
@@ -53,33 +124,146 @@ def _parse_task_line(line: str) -> tuple[str | None, str]:
 
     head = parts[0].strip()
 
-    if head.startswith("WRITE="):
-        rel = head.split("=", 1)[1].strip()
+    def _extract_path(kind: str) -> tuple[str | None, list[str]]:
+        eq_prefix = f"{kind}="
+        col_prefix = f"{kind}:"
+        if head.startswith(eq_prefix):
+            rel = head.split("=", 1)[1].strip()
+            return rel, parts[1:]
+        if head == col_prefix:
+            if len(parts) < 2:
+                return "", []
+            return parts[1].strip(), parts[2:]
+        if head.startswith(col_prefix):
+            rel = head.split(":", 1)[1].strip()
+            return rel, parts[1:]
+        return None, []
+
+    rel, rest = _extract_path("WRITE_BLOCK")
+    if rel is not None:
         if rel.endswith(":"):
             rel = rel[:-1]
-        task_text = " ".join(parts[1:]).strip() or "Write the requested file."
+        task_text = " ".join(rest).strip() or "Write the requested file."
+        return f"WRITE_BLOCK:{rel}", task_text
+
+    rel, rest = _extract_path("WRITE")
+    if rel is not None:
+        if rel.endswith(":"):
+            rel = rel[:-1]
+        task_text = " ".join(rest).strip() or "Write the requested file."
         return f"WRITE:{rel}", task_text
 
-    if head.startswith("FILE="):
-        path = head.split("=", 1)[1].strip()
+    rel, rest = _extract_path("WRITE_RAW")
+    if rel is not None:
+        if rel.endswith(":"):
+            rel = rel[:-1]
+        task_text = " ".join(rest).strip() or "Write raw file contents."
+        return f"WRITE_RAW:{rel}", task_text
+
+    path, rest = _extract_path("FILE")
+    if path is not None:
         if path.endswith(":"):
             path = path[:-1]
-        task_text = " ".join(parts[1:]).strip() or "Summarize the file."
+        task_text = " ".join(rest).strip() or "Summarize the file."
         return f"FILE:{path}", task_text
 
     return None, line
 
 
-def _load_tasks(path: str) -> list[tuple[str | None, str]]:
+def _inject_py_contract_marker(text: str, contract_name: str) -> str:
+    c = (contract_name or "").strip().lower()
+    if not c:
+        return text
+    marker = f"{PY_CONTRACT_MARKER}{c}\n"
+    return marker + (text or "")
+
+
+def _extract_py_contract_marker(text: str) -> tuple[str, str]:
+    lines = (text or "").splitlines()
+    out: list[str] = []
+    contract = ""
+    consumed = False
+    for raw in lines:
+        s = raw.strip()
+        if not consumed and s.lower().startswith(PY_CONTRACT_MARKER.lower()):
+            contract = s.split(":", 1)[1].strip().lower()
+            consumed = True
+            continue
+        out.append(raw)
+    cleaned = "\n".join(out).rstrip() + ("\n" if text.endswith("\n") and out else "")
+    return contract, cleaned
+
+
+def _load_tasks(path: str, tasks_format: str = "blocks") -> list[tuple[str | None, str]]:
     text = read_text(path, max_chars=300_000)
+    lines = text.splitlines()
     tasks: list[tuple[str | None, str]] = []
-    for raw in text.splitlines():
+    current_py_contract = ""
+    fmt = (tasks_format or "blocks").strip().lower()
+    if fmt not in {"blocks", "lines"}:
+        raise ValueError(f"unsupported tasks format: {tasks_format}")
+    if fmt == "lines":
+        for raw in lines:
+            s = raw.strip()
+            if s.upper().startswith("WRITE_BLOCK") or s.upper() == "END_WRITE_BLOCK":
+                raise ValueError("WRITE_BLOCK not supported in --tasks-format=lines")
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        m_contract = re.match(r"^\s*PY_CONTRACT\s*:\s*([A-Za-z0-9_-]+)\s*$", raw.strip(), flags=re.IGNORECASE)
+        if m_contract:
+            val = m_contract.group(1).strip().lower()
+            if val in {"strict", "tidy"}:
+                current_py_contract = val
+            i += 1
+            continue
+
         directive, task = _parse_task_line(raw)
-        if task:
-            tasks.append((directive, task))
+        if not task:
+            i += 1
+            continue
+
+        if isinstance(directive, str) and directive.startswith("WRITE_BLOCK:"):
+            rel = directive.split(":", 1)[1]
+            buf = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != "END_WRITE_BLOCK":
+                buf.append(lines[i])
+                i += 1
+            if i < len(lines) and lines[i].strip() == "END_WRITE_BLOCK":
+                i += 1
+            body = "\n".join(buf).rstrip() + "\n"
+            if current_py_contract in {"strict", "tidy"} and rel.lower().endswith(".py"):
+                body = _inject_py_contract_marker(body, current_py_contract)
+                current_py_contract = ""
+            tasks.append((f"WRITE_BLOCK:{rel}", body))
+            continue
+
+        if isinstance(directive, str) and directive.startswith("WRITE_RAW:"):
+            rel = directive.split(":", 1)[1]
+            buf = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != "END_WRITE_RAW":
+                buf.append(lines[i])
+                i += 1
+            if i < len(lines) and lines[i].strip() == "END_WRITE_RAW":
+                i += 1
+            body = "\n".join(buf).rstrip() + "\n"
+            if current_py_contract in {"strict", "tidy"} and rel.lower().endswith(".py"):
+                body = _inject_py_contract_marker(body, current_py_contract)
+                current_py_contract = ""
+            tasks.append((f"WRITE_RAW:{rel}", body))
+            continue
+
+        if isinstance(directive, str) and directive.startswith("WRITE:"):
+            rel = directive.split(":", 1)[1]
+            if current_py_contract in {"strict", "tidy"} and rel.lower().endswith(".py"):
+                task = _inject_py_contract_marker(task, current_py_contract)
+                current_py_contract = ""
+
+        tasks.append((directive, task))
+        i += 1
     return tasks
-
-
 def _render_md(title: str, bullets: list[str]) -> str:
     title = (title or "").strip()
     lines = []
@@ -106,6 +290,15 @@ def _extract_from_md(md_text: str) -> tuple[str, list[str]]:
                 bullets.append(b)
     return title, bullets
 
+
+
+def _flush_index(outdir: Path, index_lines: list[str]) -> None:
+    try:
+        index_path = outdir / "index.md"
+        index_path.write_text("\n".join(index_lines).strip() + "\n", encoding="utf-8")
+    except Exception:
+        # never let index writing crash the batch
+        pass
 
 def _open_in_vscode(path: Path) -> None:
     try:
@@ -177,6 +370,126 @@ def topic_guard(task_text: str, output_title: str, output_bullets: list[str]) ->
 
 
 
+
+def _parse_expect_prompt_block(block_text: str) -> tuple[list[str], list[str], str, str]:
+    """
+    Parse EXPECT:/PROMPT: sections from a WRITE_BLOCK body.
+
+    Format:
+      EXPECT:
+      - must_contain: <text>
+      - forbid: <text>
+      PROMPT:
+      <multiline prompt>
+      END_WRITE_BLOCK (handled by _load_tasks)
+
+    Returns: (must_contain, forbid, prompt, py_contract)
+    If EXPECT:/PROMPT: not present, returns ([], [], original_text).
+    """
+    text = (block_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    marker_contract, text = _extract_py_contract_marker(text)
+    py_contract = marker_contract
+
+    if "EXPECT:" not in text:
+        return [], [], text, py_contract
+
+    lines = text.splitlines()
+    must: list[str] = []
+    forbid: list[str] = []
+    prompt_lines: list[str] = []
+    mode = None  # None | "expect" | "prompt"
+
+    def norm_item(raw: str) -> str:
+        x = raw.strip()
+        if x.startswith("- "):
+            x = x[2:].strip()
+        return x
+
+    for raw in lines:
+        line = raw.strip()
+        if line == "EXPECT:":
+            mode = "expect"
+            continue
+        if line == "PROMPT:":
+            mode = "prompt"
+            continue
+        if line.lower().startswith("py_contract:"):
+            v = line.split(":", 1)[1].strip().lower()
+            if v in {"strict", "tidy"}:
+                py_contract = v
+            continue
+
+        if mode == "expect":
+            item = norm_item(raw)
+            low = item.lower()
+            if low.startswith("must_contain:"):
+                val = item.split(":", 1)[1].strip()
+                if val:
+                    must.append(val)
+            elif low.startswith("forbid:"):
+                val = item.split(":", 1)[1].strip()
+                if val:
+                    forbid.append(val)
+            else:
+                continue
+        elif mode == "prompt":
+            prompt_lines.append(raw)
+
+    prompt = "\n".join(prompt_lines).rstrip() + ("\n" if prompt_lines else "")
+    if not prompt:
+        return must, forbid, text, py_contract
+    return must, forbid, prompt, py_contract
+
+
+def _normalize_expectation_value(raw: str) -> str:
+    v = (raw or "").strip()
+    if len(v) >= 2 and ((v[0] == "'" and v[-1] == "'") or (v[0] == '"' and v[-1] == '"')):
+        return v[1:-1]
+    return v
+
+
+def _expectations_gate_text(text: str, must_contain: list[str], forbid: list[str]) -> tuple[bool, str]:
+    """
+    Simple per-task expectations: substring must_contain / forbid.
+    Returns (ok, message).
+    """
+    txt = text or ""
+    must_clean = [_normalize_expectation_value(m) for m in (must_contain or []) if str(m).strip()]
+    forbid_clean = [_normalize_expectation_value(f) for f in (forbid or []) if str(f).strip()]
+
+    missing = [m for m in must_clean if m not in txt]
+    present_forbid = [f for f in forbid_clean if f in txt]
+
+    if missing:
+        return False, "missing required substrings: " + ", ".join(repr(x) for x in missing)
+    if present_forbid:
+        return False, "found forbidden substrings: " + ", ".join(repr(x) for x in present_forbid)
+    return True, "expectations ok"
+
+
+def _expectation_failures(text: str, must_contain: list[str], forbid: list[str]) -> list[str]:
+    txt = text or ""
+    must_clean = [_normalize_expectation_value(m) for m in (must_contain or []) if str(m).strip()]
+    forbid_clean = [_normalize_expectation_value(f) for f in (forbid or []) if str(f).strip()]
+    failures: list[str] = []
+
+    for m in must_clean:
+        if m not in txt:
+            failures.append(f"EXPECT_MISSING|{repr(m)}")
+    for f in forbid_clean:
+        if f in txt:
+            failures.append(f"EXPECT_FORBID_HIT|{repr(f)}")
+    return failures
+
+
+def _expectations_gate(py_path: Path, must_contain: list[str], forbid: list[str]) -> tuple[bool, str]:
+    try:
+        txt = py_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return False, f"could not read file: {e}"
+    return _expectations_gate_text(txt, must_contain, forbid)
+
+
 def _lint_python_file(py_path: Path) -> tuple[bool, str]:
     """Return (ok, message)."""
     try:
@@ -184,6 +497,245 @@ def _lint_python_file(py_path: Path) -> tuple[bool, str]:
         return True, "py_compile ok"
     except Exception as e:
         return False, str(e)
+
+
+def _lint_python_source(source: str) -> tuple[bool, str]:
+    try:
+        compile(source, "<generated>", "exec")
+        return True, "compile ok"
+    except Exception as e:
+        return False, str(e)
+
+
+def _lint_python_source_with_traceback(source: str) -> tuple[bool, str]:
+    try:
+        compile(source, "<generated>", "exec")
+        return True, "compile ok"
+    except Exception:
+        tb = traceback.format_exc().strip()
+        if tb:
+            return False, tb
+        return False, "compile error"
+
+
+def _ast_quality_gate_text(text: str) -> tuple[bool, str]:
+    try:
+        tree = ast.parse(text)
+    except Exception as e:
+        return False, f"AST_PARSE_FAILED|{e}"
+
+    issues: list[str] = []
+    if re.search(r"\bTODO\b", text, flags=re.IGNORECASE):
+        issues.append("AST_TODO_FOUND")
+
+    top_level_def_or_class_names: set[str] = set()
+    saw_def_or_class = False
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            top_level_def_or_class_names.add(node.name)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            saw_def_or_class = True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
+                issues.append(f"AST_PASS_ONLY_FUNCTION|{node.name}")
+
+    if not saw_def_or_class:
+        issues.append("AST_NO_DEFS_OR_CLASSES")
+
+    # Block commented-out duplicate top-level defs/classes (e.g. "# def ok(...)" when def ok exists).
+    if top_level_def_or_class_names:
+        pat_def = re.compile(r"^\s*#\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+        pat_cls = re.compile(r"^\s*#\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\s*[:\(]")
+        for raw_line in text.splitlines():
+            m_def = pat_def.match(raw_line)
+            if m_def:
+                name = m_def.group(1)
+                if name in top_level_def_or_class_names:
+                    issues.append(f"AST_COMMENTED_OUT_DUPLICATE_DEF|{name}")
+                continue
+            m_cls = pat_cls.match(raw_line)
+            if m_cls:
+                name = m_cls.group(1)
+                if name in top_level_def_or_class_names:
+                    issues.append(f"AST_COMMENTED_OUT_DUPLICATE_DEF|{name}")
+
+    if issues:
+        uniq = sorted(set(issues))
+        return False, "\n".join(uniq)
+    return True, "ast quality ok"
+
+
+def _ast_quality_gate(py_path: Path) -> tuple[bool, str]:
+    try:
+        text = py_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return False, f"could not read file: {e}"
+    return _ast_quality_gate_text(text)
+
+
+def _run_python_file_gates(py_path: Path) -> tuple[bool, str]:
+    try:
+        text = py_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return False, f"PY_READ_FAILED|{e}"
+    ok, failures = _evaluate_python_quality_text(
+        text=text,
+        must_contain=[],
+        forbid=[],
+        extra_gate=_ast_quality_gate_text,
+    )
+    if not ok:
+        return False, "\n".join(failures)
+    return True, "python gates ok"
+
+
+def _evaluate_python_quality_text(
+    text: str,
+    must_contain: list[str],
+    forbid: list[str],
+    extra_gate=None,
+) -> tuple[bool, list[str]]:
+    failures: list[str] = []
+
+    ok, compile_msg = _lint_python_source_with_traceback(text)
+    if not ok:
+        failures.append(f"PY_COMPILE_FAILED|{compile_msg}")
+        return False, failures
+
+    expect_failures = _expectation_failures(text, must_contain, forbid)
+    if expect_failures:
+        failures.extend(expect_failures)
+        return False, failures
+
+    if callable(extra_gate):
+        ok_extra, msg_extra = extra_gate(text)
+        if not ok_extra:
+            for line in (msg_extra or "").splitlines():
+                s = line.strip()
+                if s:
+                    failures.append(s)
+            if not failures:
+                failures.append("PY_QUALITY_FAILED|unknown")
+            return False, failures
+
+    return True, []
+
+
+def _failure_codes(failures: list[str]) -> list[str]:
+    out: list[str] = []
+    for f in failures or []:
+        s = str(f).strip()
+        if not s:
+            continue
+        code = s.split("|", 1)[0].strip()
+        if code and code not in out:
+            out.append(code)
+    return out
+
+
+def _merge_unique(items: list[str], extra: list[str]) -> list[str]:
+    out: list[str] = []
+    for x in (items or []) + (extra or []):
+        s = str(x).strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def _contract_forbid(contract_name: str) -> list[str]:
+    c = (contract_name or "").strip().lower()
+    if c == "strict":
+        return ["```"]
+    if c == "tidy":
+        return ["if not True", "never be reached", "isinstance((), tuple)"]
+    return []
+
+
+def _generate_python_with_repair(
+    user_prompt: str,
+    rel_path: str,
+    must_contain: list[str],
+    forbid: list[str],
+    max_repairs: int,
+    initial_text: str = "",
+    extra_gate=None,
+) -> tuple[str, bool, str, int, str]:
+    """
+    Generate python and auto-repair on quality failures.
+    Returns (final_text, ok, last_message, model_calls, gate_summary).
+    """
+    prompt = (user_prompt or "").strip()
+    retries = max(0, int(max_repairs or 0))
+    model_calls = 0
+    last_text = ""
+    last_failures: list[str] = []
+    summary_parts: list[str] = []
+
+    if initial_text:
+        candidate = _strip_code_fences(initial_text)
+        ok, failures = _evaluate_python_quality_text(
+            text=candidate,
+            must_contain=must_contain,
+            forbid=forbid,
+            extra_gate=extra_gate,
+        )
+        if ok:
+            return candidate, True, "QUALITY_OK", model_calls, "attempt 0: PASS; final: PASS"
+        last_text = candidate
+        last_failures = failures
+        c = _failure_codes(failures)
+        summary_parts.append(f"attempt 0: {','.join(c) if c else 'UNKNOWN_FAILURE'}")
+    else:
+        full_prompt = CODE_CONTRACT_PY + "\n\n" + prompt
+        candidate = _strip_code_fences(_generate_adapter(full_prompt, stream=False, attempt=0))
+        model_calls += 1
+        ok, failures = _evaluate_python_quality_text(
+            text=candidate,
+            must_contain=must_contain,
+            forbid=forbid,
+            extra_gate=extra_gate,
+        )
+        if ok:
+            return candidate, True, "QUALITY_OK", model_calls, "attempt 0: PASS; final: PASS"
+        last_text = candidate
+        last_failures = failures
+        c = _failure_codes(failures)
+        summary_parts.append(f"attempt 0: {','.join(c) if c else 'UNKNOWN_FAILURE'}")
+
+    for repair_ix in range(1, retries + 1):
+        failure_block = "\n".join(last_failures) if last_failures else "UNKNOWN_FAILURE"
+        repair_prompt = (
+            f"{CODE_CONTRACT_PY}\n\n"
+            f"Original prompt:\n{prompt}\n\n"
+            f"Target file path: {rel_path}\n"
+            "Previous output failed quality gates.\n"
+            "Failure reasons (machine-readable):\n"
+            f"{failure_block}\n\n"
+            "Return ONLY valid Python code. No markdown fences. No commentary.\n\n"
+            "Previous output:\n"
+            f"{last_text}"
+        )
+        candidate = _strip_code_fences(_generate_adapter(repair_prompt, stream=False, attempt=repair_ix))
+        model_calls += 1
+        ok, failures = _evaluate_python_quality_text(
+            text=candidate,
+            must_contain=must_contain,
+            forbid=forbid,
+            extra_gate=extra_gate,
+        )
+        if ok:
+            summary_parts.append("final: PASS")
+            return candidate, True, "QUALITY_OK", model_calls, "; ".join(summary_parts)
+        last_text = candidate
+        last_failures = failures
+        c = _failure_codes(failures)
+        summary_parts.append(f"attempt {repair_ix}: {','.join(c) if c else 'UNKNOWN_FAILURE'}")
+
+    final_msg = "REPAIR_EXHAUSTED\n" + "\n".join(last_failures or ["UNKNOWN_FAILURE"])
+    summary_parts.append("final: FAIL_AFTER_RETRIES")
+    return last_text, False, final_msg, model_calls, "; ".join(summary_parts)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -210,29 +762,84 @@ def _maybe_run_pytest(project_root: Path) -> tuple[bool, str]:
     if not tests_dir.exists():
         return True, "pytest skipped (no tests/ folder)"
 
-    try:
-        import pytest  # noqa: F401
-    except Exception:
-        return True, "pytest skipped (pytest not installed)"
-
     env = dict(**__import__("os").environ)
-    # If you use src/ layout, this helps imports like `from ai_deney...`
     src_dir = project_root / "src"
     if src_dir.exists():
         env["PYTHONPATH"] = str(src_dir) + (":" + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
 
     try:
-        r = subprocess.run(["pytest", "-q"], cwd=str(project_root), env=env, capture_output=True, text=True)
+        venv_pytest = project_root / ".venv" / "bin" / "pytest"
+        if venv_pytest.exists() and os.access(str(venv_pytest), os.X_OK):
+            cmd = [str(venv_pytest), "-q"]
+        else:
+            cmd = ["pytest", "-q"]
+        extra = env.get("AI_DENEY_PYTEST_ARGS", "").strip()
+        if extra:
+            try:
+                cmd.extend(shlex.split(extra))
+            except Exception:
+                pass
+
+        r = subprocess.run(cmd, cwd=str(project_root), env=env, capture_output=True, text=True)
         if r.returncode == 0:
             return True, "pytest ok"
-        # include a short tail of output
         out = (r.stdout + "\n" + r.stderr).strip()
         tail = "\n".join(out.splitlines()[-25:])
         return False, "pytest failed:\n" + tail
+    except FileNotFoundError:
+        return True, "pytest skipped (pytest not installed)"
     except Exception as e:
         return False, f"pytest error: {e}"
 
+
+def _run_bundle_script(batch_dir: Path) -> tuple[bool, str]:
+    script = Path("scripts/bundle_batch.sh")
+    if not script.exists():
+        return False, "bundle requested but missing script: scripts/bundle_batch.sh"
+    if not os.access(str(script), os.X_OK):
+        return False, "bundle requested but script is not executable: scripts/bundle_batch.sh"
+
+    try:
+        r = subprocess.run([str(script), str(batch_dir)], capture_output=True, text=True)
+    except Exception as e:
+        return False, f"bundle failed to execute: {e}"
+
+    if r.returncode != 0:
+        out = (r.stdout + "\n" + r.stderr).strip()
+        tail = "\n".join(out.splitlines()[-25:])
+        return False, f"bundle script failed:\n{tail}"
+    return True, "bundle ok"
+
+
+def _parse_gate_summary_attempts(gate_summary: str) -> list[dict]:
+    attempts: list[dict] = []
+    s = (gate_summary or "").strip()
+    if not s:
+        return attempts
+    parts = [p.strip() for p in s.split(";") if p.strip()]
+    for p in parts:
+        m = re.match(r"^attempt\s+(\d+)\s*:\s*(.+)$", p, flags=re.IGNORECASE)
+        if not m:
+            continue
+        n = int(m.group(1))
+        raw_codes = [x.strip() for x in m.group(2).split(",") if x.strip()]
+        known_codes = [c for c in raw_codes if c and c != "PASS" and c != "UNKNOWN_FAILURE"]
+        status = "PASS" if not known_codes else "FAIL"
+        attempts.append({
+            "attempt": n,
+            "status": status,
+            "gate_failures": known_codes,
+        })
+    return attempts
+
+
+def _write_gate_report(path: Path, report: dict) -> None:
+    try:
+        path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
 def main():
+    global _STUB_MODEL_FIXTURE
     parser = argparse.ArgumentParser(description="Batch runner for your local agent.")
     parser.add_argument("tasks_file", nargs="?", default="", help="Tasks file. Optional if --run-latest-next.")
     parser.add_argument("--run-latest-next", action="store_true", help="Use newest outputs/batch-*/next_tasks.txt.")
@@ -248,15 +855,23 @@ def main():
     parser.add_argument("--bullets", type=int, default=0, help="Force bullet count (0 = model decides).")
 
     parser.add_argument("--outdir", default="", help="Output directory. Default outputs/batch-<timestamp>/")
-    parser.add_argument("--format", choices=["json", "md"], default="md", help="Output format for JSON modes.")
+    parser.add_argument("--format", choices=["json", "md"], default="md", help="Output format for JSON/memory/chat task outputs (not task-file parsing).")
+    parser.add_argument("--tasks-format", choices=["lines", "blocks"], default="blocks", help="How to parse tasks file input.")
+    parser.add_argument("--stub-model", default="", help="Deterministic local fixture model (disables live model calls).")
 
     parser.add_argument("--review", action="store_true", help="Generate review.md.")
     parser.add_argument("--review-bullets", type=int, default=7, help="Bullets per section in review.")
     parser.add_argument("--next-tasks", action="store_true", help="Generate next_tasks.txt (requires --review).")
     parser.add_argument("--next-tasks-n", type=int, default=8, help="How many lines for next_tasks.txt.")
     parser.add_argument("--topic-guard", action="store_true", help="Flag likely off-topic outputs.")
+    parser.add_argument("--repair-retries", type=int, default=0, help="Auto-repair retries for generated Python files (0=disabled).")
+    parser.add_argument("--bundle", action="store_true", help="Write bundle.txt using scripts/bundle_batch.sh after successful batch.")
     parser.add_argument("--open", action="store_true", help="Open index/review/next_tasks in VS Code.")
     args = parser.parse_args()
+    _STUB_MODEL_FIXTURE = (args.stub_model or "").strip()
+    if _STUB_MODEL_FIXTURE and _STUB_MODEL_FIXTURE not in _KNOWN_STUB_FIXTURES:
+        print(f"unknown --stub-model fixture: {_STUB_MODEL_FIXTURE}")
+        raise SystemExit(1)
 
     if args.run_latest_next and not args.tasks_file:
         latest = _find_latest_next_tasks()
@@ -278,8 +893,13 @@ def main():
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         outdir = Path(f"outputs/batch-{ts}")
     outdir.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now().isoformat()
 
-    tasks = _load_tasks(args.tasks_file)
+    try:
+        tasks = _load_tasks(args.tasks_file, tasks_format=args.tasks_format)
+    except ValueError as e:
+        print(str(e))
+        raise SystemExit(1)
     if not tasks:
         print("No tasks found.")
         return
@@ -294,165 +914,363 @@ def main():
     index_lines.append("")
 
     produced_files: list[tuple[str, Path]] = []
+    gate_report = {
+        "batch_id": outdir.name,
+        "outdir": str(outdir),
+        "tasks_file": args.tasks_file,
+        "mode": "chat" if args.chat else ("router" if args.router else ("memory" if args.use_memory else "json")),
+        "started_at": started_at,
+        "finished_at": "",
+        "tasks": [],
+        "gate_counts": {},
+    }
 
-    for i, (directive, task) in enumerate(tasks, start=1):
-        base = f"{i:03d}-{_slug(task)}"
+    def _report_task(task_index: int, directive: str, target: str, final_status: str, gate_summary: str = "") -> None:
+        attempts = _parse_gate_summary_attempts(gate_summary)
+        for a in attempts:
+            for code in a.get("gate_failures", []) or []:
+                gate_report["gate_counts"][code] = int(gate_report["gate_counts"].get(code, 0)) + 1
+        gate_report["tasks"].append({
+            "task_index": task_index,
+            "directive": directive,
+            "target": target,
+            "final_status": final_status,
+            "attempts": attempts,
+        })
 
-        # Decide mode
-        if args.chat:
-            mode = "chat"
-        elif args.use_memory:
-            mode = "memory"
-        elif args.router:
-            mode = "router->memory" if (args.memory_query.strip() and ctx.strip()) else "router->json"
-        else:
-            mode = "json"
+    try:
+        for i, (directive, task) in enumerate(tasks, start=1):
+            base = f"{i:03d}-{_slug(task)}"
 
-        # Handle WRITE tasks first: write + continue (no JSON run)
-        if isinstance(directive, str) and directive.startswith("WRITE:"):
-            rel = directive.split(":", 1)[1]
-            label = f"{task} (WRITE={rel})"
+            # Decide mode
+            if args.chat:
+                mode = "chat"
+            elif args.use_memory:
+                mode = "memory"
+            elif args.router:
+                mode = "router->memory" if (args.memory_query.strip() and ctx.strip()) else "router->json"
+            else:
+                mode = "json"
+
+            # Handle WRITE tasks first: write + continue (no JSON run)
+            if isinstance(directive, str) and directive.startswith("WRITE_RAW:"):
+                rel = directive.split(":", 1)[1]
+                label = f"WRITE_RAW={rel}"
+                try:
+                    py_contract, raw_content = _extract_py_contract_marker(task)
+                    content = raw_content
+                    contract_forbid = _contract_forbid(py_contract) if rel.lower().endswith(".py") else []
+
+                    gen_path = _write_generated_file(outdir, rel, content)
+                    gate_summary = ""
+                    if gen_path.suffix == ".py":
+                        ok, msg = _run_python_file_gates(gen_path)
+                        if not ok:
+                            codes0 = _failure_codes((msg or "").splitlines())
+                            gate_summary = f"attempt 0: {','.join(codes0) if codes0 else 'UNKNOWN_FAILURE'}; final: FAIL_AFTER_RETRIES"
+                            if args.repair_retries > 0:
+                                repaired, ok_repair, repair_msg, _calls, gate_summary = _generate_python_with_repair(
+                                    user_prompt=f"Repair this Python file for target path {rel}.",
+                                    rel_path=rel,
+                                    must_contain=[],
+                                    forbid=contract_forbid,
+                                    max_repairs=args.repair_retries,
+                                    initial_text=content,
+                                    extra_gate=_ast_quality_gate_text,
+                                )
+                                if ok_repair:
+                                    content = repaired
+                                    gen_path = _write_generated_file(outdir, rel, content)
+                                    ok, msg = _run_python_file_gates(gen_path)
+                                else:
+                                    msg = repair_msg
+
+                            if not ok:
+                                err_path = outdir / f"{base}.py_compile.error.txt"
+                                err_path.write_text(msg + "\n", encoding="utf-8")
+                                index_lines.append(f"## {i}. {label}")
+                                if gate_summary:
+                                    index_lines.append(f"- gate-summary: `{gate_summary}`")
+                                index_lines.append(f"- ERROR: `{err_path.name}`")
+                                index_lines.append("")
+                                _report_task(i, "WRITE_RAW", rel, "FAIL", gate_summary)
+                                log_run({"mode": "batch->error", "task": label, "title": "py_compile failed", "saved_to": str(err_path)})
+                                _flush_index(outdir, index_lines)
+                                raise SystemExit(1)
+
+                    index_lines.append(f"## {i}. {label}")
+                    if gate_summary:
+                        index_lines.append(f"- gate-summary: `{gate_summary}`")
+                    index_lines.append(f"- wrote: `generated/{rel}`")
+                    index_lines.append("")
+                    _report_task(i, "WRITE_RAW", rel, "PASS", gate_summary)
+                    produced_files.append((label, gen_path))
+                    log_run({"mode": "batch->write_raw", "task": label, "title": f"wrote {rel}", "saved_to": str(gen_path)})
+                except SystemExit:
+                    raise
+                except Exception as e:
+                    err_path = outdir / f"{base}.error.txt"
+                    err_path.write_text(str(e) + "\n", encoding="utf-8")
+                    index_lines.append(f"## {i}. {label}")
+                    index_lines.append(f"- ERROR: `{err_path.name}`")
+                    index_lines.append("")
+                    _report_task(i, "WRITE_RAW", rel, "FAIL", "")
+                    log_run({"mode": "batch->error", "task": label, "title": "write_raw error", "saved_to": str(err_path)})
+                    raise SystemExit(1)
+                continue
+
+            if isinstance(directive, str) and directive.startswith("WRITE_BLOCK:"):
+                rel = directive.split(":", 1)[1]
+                label = f"WRITE_BLOCK={rel}"
+                try:
+                    must_contains, forbids, parsed_prompt, py_contract = _parse_expect_prompt_block(task)
+                    actual_prompt = (parsed_prompt or task).strip()
+                    gate_summary = ""
+                    if rel.lower().endswith(".py"):
+                        forbids = _merge_unique(forbids, _contract_forbid(py_contract))
+
+                    if rel.lower().endswith(".py"):
+                        text, ok_repair, repair_msg, _calls, gate_summary = _generate_python_with_repair(
+                            user_prompt=actual_prompt,
+                            rel_path=rel,
+                            must_contain=must_contains,
+                            forbid=forbids,
+                            max_repairs=args.repair_retries,
+                            extra_gate=_ast_quality_gate_text,
+                        )
+                        if not ok_repair:
+                            err_path = outdir / f"{base}.semantic.error.txt"
+                            err_msg = "SEMANTIC GATE FAILED\n" + repair_msg + "\n\nGenerated Text:\n" + text
+                            err_path.write_text(err_msg, encoding="utf-8")
+                            index_lines.append(f"## {i}. {label}")
+                            if gate_summary:
+                                index_lines.append(f"- gate-summary: `{gate_summary}`")
+                            index_lines.append(f"- ERROR: `{err_path.name}` (semantic gate)")
+                            index_lines.append("")
+                            _report_task(i, "WRITE_BLOCK", rel, "FAIL", gate_summary)
+                            log_run({"mode": "batch->error", "task": label, "title": "semantic gate failed", "saved_to": str(err_path)})
+                            _flush_index(outdir, index_lines)
+                            raise SystemExit(1)
+                    else:
+                        text = _generate_adapter(actual_prompt, stream=False, attempt=0)
+                        ok_expect, msg_expect = _expectations_gate_text(text, must_contains, forbids)
+                        if not ok_expect:
+                            err_path = outdir / f"{base}.semantic.error.txt"
+                            err_msg = "SEMANTIC GATE FAILED\n" + msg_expect + "\n\nGenerated Text:\n" + text
+                            err_path.write_text(err_msg, encoding="utf-8")
+                            index_lines.append(f"## {i}. {label}")
+                            index_lines.append(f"- ERROR: `{err_path.name}` (semantic gate)")
+                            index_lines.append("")
+                            _report_task(i, "WRITE_BLOCK", rel, "FAIL", "")
+                            log_run({"mode": "batch->error", "task": label, "title": "semantic gate failed", "saved_to": str(err_path)})
+                            _flush_index(outdir, index_lines)
+                            raise SystemExit(1)
+
+                    gen_path = _write_generated_file(outdir, rel, text)
+                    if gen_path.suffix == ".py":
+                        ok, msg = _run_python_file_gates(gen_path)
+                        if not ok:
+                            err_path = outdir / f"{base}.py_compile.error.txt"
+                            err_path.write_text(msg + "\n", encoding="utf-8")
+                            index_lines.append(f"## {i}. {label}")
+                            index_lines.append(f"- ERROR: `{err_path.name}`")
+                            index_lines.append("")
+                            _report_task(i, "WRITE_BLOCK", rel, "FAIL", gate_summary if rel.lower().endswith(".py") else "")
+                            log_run({"mode": "batch->error", "task": label, "title": "py_compile failed", "saved_to": str(err_path)})
+                            _flush_index(outdir, index_lines)
+                            raise SystemExit(1)
+
+                    index_lines.append(f"## {i}. {label}")
+                    if rel.lower().endswith(".py") and gate_summary:
+                        index_lines.append(f"- gate-summary: `{gate_summary}`")
+                    index_lines.append(f"- wrote: `generated/{rel}`")
+                    index_lines.append("")
+                    _report_task(i, "WRITE_BLOCK", rel, "PASS", gate_summary if rel.lower().endswith(".py") else "")
+                    produced_files.append((label, gen_path))
+                    log_run({"mode": "batch->write_block", "task": label, "title": f"wrote {rel}", "saved_to": str(gen_path)})
+                except SystemExit:
+                    raise
+                except Exception as e:
+                    err_path = outdir / f"{base}.error.txt"
+                    err_path.write_text(str(e) + "\n", encoding="utf-8")
+                    index_lines.append(f"## {i}. {label}")
+                    index_lines.append(f"- ERROR: `{err_path.name}`")
+                    index_lines.append("")
+                    _report_task(i, "WRITE_BLOCK", rel, "FAIL", "")
+                    log_run({"mode": "batch->error", "task": label, "title": "write_block error", "saved_to": str(err_path)})
+                    raise SystemExit(1)
+                continue
+
+            if isinstance(directive, str) and directive.startswith("WRITE:"):
+                rel = directive.split(":", 1)[1]
+                py_contract, write_task = _extract_py_contract_marker(task)
+                label = f"{write_task} (WRITE={rel})"
+                try:
+                    gate_summary = ""
+                    if rel.lower().endswith(".py"):
+                        contract_forbid = _contract_forbid(py_contract)
+                        text, ok_repair, repair_msg, _calls, gate_summary = _generate_python_with_repair(
+                            user_prompt=write_task,
+                            rel_path=rel,
+                            must_contain=[],
+                            forbid=contract_forbid,
+                            max_repairs=args.repair_retries,
+                            extra_gate=_ast_quality_gate_text,
+                        )
+                        if not ok_repair:
+                            err_path = outdir / f"{base}.semantic.error.txt"
+                            err_msg = "SEMANTIC GATE FAILED\n" + repair_msg + "\n\nGenerated Text:\n" + text
+                            err_path.write_text(err_msg, encoding="utf-8")
+                            index_lines.append(f"## {i}. {label}")
+                            if gate_summary:
+                                index_lines.append(f"- gate-summary: `{gate_summary}`")
+                            index_lines.append(f"- ERROR: `{err_path.name}` (semantic gate)")
+                            index_lines.append("")
+                            _report_task(i, "WRITE", rel, "FAIL", gate_summary)
+                            log_run({"mode": "batch->error", "task": label, "title": "semantic gate failed", "saved_to": str(err_path)})
+                            _flush_index(outdir, index_lines)
+                            raise SystemExit(1)
+                    else:
+                        text = _generate_adapter(write_task, stream=False, attempt=0)
+
+                    gen_path = _write_generated_file(outdir, rel, text)
+                    if gen_path.suffix == ".py":
+                        ok, msg = _run_python_file_gates(gen_path)
+                        if not ok:
+                            err_path = outdir / f"{base}.py_compile.error.txt"
+                            err_path.write_text(msg + "\n", encoding="utf-8")
+                            index_lines.append(f"## {i}. {label}")
+                            index_lines.append(f"- ERROR: `{err_path.name}`")
+                            index_lines.append("")
+                            _report_task(i, "WRITE", rel, "FAIL", gate_summary if rel.lower().endswith(".py") else "")
+                            log_run({"mode": "batch->error", "task": label, "title": "py_compile failed", "saved_to": str(err_path)})
+                            _flush_index(outdir, index_lines)
+                            raise SystemExit(1)
+
+                    index_lines.append(f"## {i}. {label}")
+                    if rel.lower().endswith(".py") and gate_summary:
+                        index_lines.append(f"- gate-summary: `{gate_summary}`")
+                    index_lines.append(f"- wrote: `generated/{rel}`")
+                    index_lines.append("")
+                    _report_task(i, "WRITE", rel, "PASS", gate_summary if rel.lower().endswith(".py") else "")
+                    produced_files.append((label, gen_path))
+                    log_run({"mode": "batch->write", "task": label, "title": f"wrote {rel}", "saved_to": str(gen_path)})
+                except SystemExit:
+                    raise
+                except Exception as e:
+                    err_path = outdir / f"{base}.error.txt"
+                    err_path.write_text(str(e) + "\n", encoding="utf-8")
+                    index_lines.append(f"## {i}. {label}")
+                    index_lines.append(f"- ERROR: `{err_path.name}`")
+                    index_lines.append("")
+                    _report_task(i, "WRITE", rel, "FAIL", "")
+                    log_run({"mode": "batch->error", "task": label, "title": "write error", "saved_to": str(err_path)})
+                    raise SystemExit(1)
+                continue
+
+    # Build task, injecting file content if FILE=...
+            full_task = task
+            label = task
+            if isinstance(directive, str) and directive.startswith("FILE:"):
+                path = directive.split(":", 1)[1]
+                label = f"{task} (FILE={path})"
+                try:
+                    file_text = read_text(path)
+                    full_task = task + "\n\n[FILE CONTENT]\n" + file_text
+                except FileNotFoundError as e:
+                    err_path = outdir / f"{base}.error.txt"
+                    err_path.write_text(str(e) + "\n", encoding="utf-8")
+                    index_lines.append(f"## {i}. {label}")
+                    index_lines.append(f"- ERROR: `{err_path.name}` (missing file)")
+                    index_lines.append("")
+                    _report_task(i, "FILE", path, "FAIL", "")
+                    log_run({"mode": "batch->error", "task": label, "title": "missing file", "saved_to": str(err_path)})
+                    continue
+    
             try:
-                prompt = task
-                if rel.lower().endswith('.py'):
-                    prompt = CODE_CONTRACT_PY + "\n\n" + task
-                text = generate(prompt, stream=False)
-                if rel.lower().endswith('.py'):
-                    text = _strip_code_fences(text)
-                gen_path = _write_generated_file(outdir, rel, text)
-                # Run pytest after generating a .py file (or any write), and log result in index
-                ok_py, msg_py = _maybe_run_pytest(Path("."))
-                if ok_py:
-                    index_lines.append(f"- pytest: {msg_py}")
+                if mode == "chat":
+                    text = _generate_adapter(full_task, stream=False, attempt=0)
+                    saved_path = outdir / f"{base}.txt"
+                    saved_path.write_text(text.strip() + "\n", encoding="utf-8")
+                    index_lines.append(f"## {i}. {label}")
+                    index_lines.append(f"- output: `{saved_path.name}`")
                     index_lines.append("")
-                    log_run({"mode": "batch->pytest", "task": label, "title": msg_py, "saved_to": str(outdir)})
+                    _report_task(i, directive.split(":", 1)[0] if isinstance(directive, str) else "TASK", str(saved_path.name), "PASS", "")
+                    produced_files.append((label, saved_path))
+                    log_run({"mode": "batch->chat", "task": label, "title": text[:60], "saved_to": str(saved_path)})
+                    continue
+    
+                if mode.endswith("memory"):
+                    data = _run_memory_agent_adapter(full_task, context=ctx)
+                    printable = {k: v for k, v in data.items() if k != "memory_to_save"}
                 else:
-                    warn_path2 = outdir / f"{base}.pytest.warning.txt"
-                    warn_path2.write_text("PYTEST WARNING\n" + msg_py + "\n", encoding="utf-8")
-                    index_lines.append(f"- ⚠️ pytest: `{warn_path2.name}`")
-                    index_lines.append("")
-                    log_run({"mode": "batch->pytest", "task": label, "title": "pytest failed", "saved_to": str(warn_path2)})
-
-                # Auto-lint: if we wrote a .py file, run py_compile
-                if gen_path.suffix == ".py":
-                    ok, msg = _lint_python_file(gen_path)
-                    if not ok:
-                        warn_path = outdir / f"{base}.warning.txt"
-                        warn_path.write_text("PYTHON SYNTAX WARNING\n" + msg + "\n", encoding="utf-8")
-                        index_lines.append(f"- ⚠️ python syntax: `{warn_path.name}`")
-                        index_lines.append("")
-                        log_run({"mode": "batch->lint_warning", "task": label, "title": "py_compile failed", "saved_to": str(warn_path)})
-
+                    printable = _run_json_agent_adapter(full_task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
+    
+                if args.format == "md":
+                    saved_path = outdir / f"{base}.md"
+                    md = _render_md(str(printable.get("title", "")).strip(), printable.get("bullets", []))
+                    saved_path.write_text(md, encoding="utf-8")
+                else:
+                    saved_path = outdir / f"{base}.json"
+                    saved_path.write_text(json.dumps(printable, indent=2) + "\n", encoding="utf-8")
+    
                 index_lines.append(f"## {i}. {label}")
-                index_lines.append(f"- wrote: `generated/{rel}`")
+                index_lines.append(f"- output: `{saved_path.name}`")
                 index_lines.append("")
-                produced_files.append((label, gen_path))
-                ok_pytest, msg_pytest = _maybe_run_pytest(Path("."))
-                if not ok_pytest:
-                    warn_path2 = outdir / f"{base}.pytest.warning.txt"
-                    warn_path2.write_text("PYTEST WARNING\n" + msg_pytest + "\n", encoding="utf-8")
-                    index_lines.append(f"- ⚠️ pytest: `{warn_path2.name}`")
-                    index_lines.append("")
-                    log_run({"mode": "batch->pytest", "task": label, "title": "pytest failed", "saved_to": str(warn_path2)})
-                else:
-                    log_run({"mode": "batch->pytest", "task": label, "title": msg_pytest, "saved_to": str(outdir)})
-
-                log_run({"mode": "batch->write", "task": label, "title": f"wrote {rel}", "saved_to": str(gen_path)})
+                _report_task(i, directive.split(":", 1)[0] if isinstance(directive, str) else "TASK", str(saved_path.name), "PASS", "")
+                produced_files.append((label, saved_path))
+    
+                if args.topic_guard:
+                    title = str(printable.get("title", "")).strip()
+                    bullets = printable.get("bullets", [])
+                    if not isinstance(bullets, list):
+                        bullets = []
+                    bullets = [str(b).strip() for b in bullets if str(b).strip()]
+                    off, reason = topic_guard(label, title, bullets)
+                    if off:
+                        warn_path = outdir / f"{base}.warning.txt"
+                        warn_path.write_text(f"OFF-TOPIC WARNING\nTask: {label}\nReason: {reason}\nOutput: {saved_path.name}\n", encoding="utf-8")
+                        index_lines.append(f"- ⚠️ OFF-TOPIC: `{warn_path.name}` ({reason})")
+                        index_lines.append("")
+                        log_run({"mode": "batch->topic_guard", "task": label, "title": "off-topic", "saved_to": str(warn_path)})
+    
+                log_run({
+                    "mode": f"batch->{mode}",
+                    "task": label,
+                    "title": printable.get("title", "Result"),
+                    "strict": bool(args.strict),
+                    "verify": bool(args.verify),
+                    "memory_query": args.memory_query.strip(),
+                    "saved_to": str(saved_path),
+                })
+    
             except Exception as e:
                 err_path = outdir / f"{base}.error.txt"
                 err_path.write_text(str(e) + "\n", encoding="utf-8")
                 index_lines.append(f"## {i}. {label}")
                 index_lines.append(f"- ERROR: `{err_path.name}`")
                 index_lines.append("")
-                log_run({"mode": "batch->error", "task": label, "title": "write error", "saved_to": str(err_path)})
-            continue
-
-        # Build task, injecting file content if FILE=...
-        full_task = task
-        label = task
-        if isinstance(directive, str) and directive.startswith("FILE:"):
-            path = directive.split(":", 1)[1]
-            label = f"{task} (FILE={path})"
-            try:
-                file_text = read_text(path)
-                full_task = task + "\n\n[FILE CONTENT]\n" + file_text
-            except FileNotFoundError as e:
-                err_path = outdir / f"{base}.error.txt"
-                err_path.write_text(str(e) + "\n", encoding="utf-8")
-                index_lines.append(f"## {i}. {label}")
-                index_lines.append(f"- ERROR: `{err_path.name}` (missing file)")
-                index_lines.append("")
-                log_run({"mode": "batch->error", "task": label, "title": "missing file", "saved_to": str(err_path)})
-                continue
-
-        try:
-            if mode == "chat":
-                text = generate(full_task, stream=False)
-                saved_path = outdir / f"{base}.txt"
-                saved_path.write_text(text.strip() + "\n", encoding="utf-8")
-                index_lines.append(f"## {i}. {label}")
-                index_lines.append(f"- output: `{saved_path.name}`")
-                index_lines.append("")
-                produced_files.append((label, saved_path))
-                log_run({"mode": "batch->chat", "task": label, "title": text[:60], "saved_to": str(saved_path)})
-                continue
-
-            if mode.endswith("memory"):
-                data = run_memory_agent(full_task, context=ctx)
-                printable = {k: v for k, v in data.items() if k != "memory_to_save"}
-            else:
-                printable = run_json_agent(full_task, strict=args.strict, verify=args.verify, bullets_n=bullets_n)
-
-            if args.format == "md":
-                saved_path = outdir / f"{base}.md"
-                md = _render_md(str(printable.get("title", "")).strip(), printable.get("bullets", []))
-                saved_path.write_text(md, encoding="utf-8")
-            else:
-                saved_path = outdir / f"{base}.json"
-                saved_path.write_text(json.dumps(printable, indent=2) + "\n", encoding="utf-8")
-
-            index_lines.append(f"## {i}. {label}")
-            index_lines.append(f"- output: `{saved_path.name}`")
-            index_lines.append("")
-            produced_files.append((label, saved_path))
-
-            if args.topic_guard:
-                title = str(printable.get("title", "")).strip()
-                bullets = printable.get("bullets", [])
-                if not isinstance(bullets, list):
-                    bullets = []
-                bullets = [str(b).strip() for b in bullets if str(b).strip()]
-                off, reason = topic_guard(label, title, bullets)
-                if off:
-                    warn_path = outdir / f"{base}.warning.txt"
-                    warn_path.write_text(f"OFF-TOPIC WARNING\nTask: {label}\nReason: {reason}\nOutput: {saved_path.name}\n", encoding="utf-8")
-                    index_lines.append(f"- ⚠️ OFF-TOPIC: `{warn_path.name}` ({reason})")
-                    index_lines.append("")
-                    log_run({"mode": "batch->topic_guard", "task": label, "title": "off-topic", "saved_to": str(warn_path)})
-
-            log_run({
-                "mode": f"batch->{mode}",
-                "task": label,
-                "title": printable.get("title", "Result"),
-                "strict": bool(args.strict),
-                "verify": bool(args.verify),
-                "memory_query": args.memory_query.strip(),
-                "saved_to": str(saved_path),
-            })
-
-        except OllamaNotRunning as e:
-            print(str(e))
-            return
-        except Exception as e:
-            err_path = outdir / f"{base}.error.txt"
-            err_path.write_text(str(e) + "\n", encoding="utf-8")
-            index_lines.append(f"## {i}. {label}")
-            index_lines.append(f"- ERROR: `{err_path.name}`")
-            index_lines.append("")
-            log_run({"mode": "batch->error", "task": label, "title": "error", "saved_to": str(err_path)})
+                _report_task(i, directive.split(":", 1)[0] if isinstance(directive, str) else "TASK", label, "FAIL", "")
+                log_run({"mode": "batch->error", "task": label, "title": "error", "saved_to": str(err_path)})
+    finally:
+        gate_report["finished_at"] = datetime.now().isoformat()
+        _write_gate_report(outdir / "gate_report.json", gate_report)
 
     index_path = outdir / "index.md"
     index_path.write_text("\n".join(index_lines).strip() + "\n", encoding="utf-8")
+
+    # END-OF-BATCH PYTEST GATE
+    ok_py, msg_py = _maybe_run_pytest(Path("."))
+    if not ok_py:
+        err_path = outdir / "pytest.error.txt"
+        err_path.write_text("PYTEST FAILED\n" + msg_py + "\n", encoding="utf-8")
+        index_lines.append(f"- ERROR: `{err_path.name}`")
+        index_lines.append("")
+        log_run({"mode": "batch->error", "task": f"pytest gate for {outdir.name}", "title": "pytest failed", "saved_to": str(err_path)})
+        index_path.write_text("\n".join(index_lines).strip() + "\n", encoding="utf-8")
+        raise SystemExit(1)
+    else:
+        log_run({"mode": "batch->pytest", "task": f"pytest gate for {outdir.name}", "title": msg_py, "saved_to": str(outdir)})
 
     review_path = None
     next_tasks_path = None
@@ -504,7 +1322,7 @@ Format:
 Digest:
 {json.dumps(digests, indent=2)}
 """
-            review_text = generate(review_prompt, stream=False).strip() + "\n"
+            review_text = _generate_adapter(review_prompt, stream=False, attempt=0).strip() + "\n"
 
         review_path = outdir / "review.md"
         review_path.write_text(review_text, encoding="utf-8")
@@ -528,7 +1346,7 @@ Review text:
 Digest:
 {json.dumps(digests, indent=2)}
 """
-            nxt = generate(next_prompt, stream=False).strip()
+            nxt = _generate_adapter(next_prompt, stream=False, attempt=0).strip()
             lines = []
             for line in nxt.splitlines():
                 line = line.strip()
@@ -567,6 +1385,13 @@ Digest:
             _open_in_vscode(review_path)
         if next_tasks_path:
             _open_in_vscode(next_tasks_path)
+
+    # Note: bundling currently runs on successful completion only.
+    if args.bundle:
+        ok_bundle, msg_bundle = _run_bundle_script(outdir)
+        if not ok_bundle:
+            print(msg_bundle)
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

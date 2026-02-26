@@ -1,29 +1,58 @@
 # Python
-.venv/
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.venv/
 
-# macOS
+# AI Outputs
+outputs/batch-*/
+outputs/*.json
+outputs/*.txt
+
+# Logs
+run_log.jsonl
+
+# Mac OS
 .DS_Store
 
-# VS Code (keep settings.json tracked if you want; otherwise ignore the folder)
-# .vscode/
-
-# Generated outputs
+# --- local artifacts ---
 outputs/
-
-# Agent memory
-memory.json
-
-# Run logs
+archive/
+backups/
 runs/
+tests/_tmp_tasks/
+__pycache__/
+*.pyc
+*.bak*
+*.log
 
-# Local scratch / curriculum artifacts
+# local scratch
+memory.json
+history/
+handoff/
 data/
 docs/
-doc*.md
-sample.md
-tasks_*.txt
-next_tasks_*.txt
 patch_*.py
-random_cropping_torch_fixed.py
+tasks_day*.txt
+random_*.py
+
+# --- local artifacts ---
+outputs/
+archive/
+backups/
+runs/
+tests/_tmp_tasks/
+__pycache__/
+*.pyc
+*.bak*
+*.log
+
+# local scratch
+memory.json
+history/
+handoff/
+data/
+docs/
+patch_*.py
+tasks_day*.txt
+random_*.py
