@@ -11,12 +11,20 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+if [[ -n "${RELEASE_PYTHON:-}" ]]; then
+  PY="$RELEASE_PYTHON"
+elif [[ -x "$ROOT/.venv/bin/python3" ]]; then
+  PY="$ROOT/.venv/bin/python3"
+else
+  PY="python3"
+fi
+
 if [[ ! -d "$ART_DIR" ]]; then
   echo "artifact_dir not found: $ART_DIR" >&2
   exit 2
 fi
 
-TRANSCRIPT="$(python3 - "$ART_DIR" <<'PY'
+TRANSCRIPT="$("$PY" - "$ART_DIR" <<'PY'
 import sys
 from pathlib import Path
 
@@ -38,7 +46,7 @@ fi
 
 TASK_FILE="$TASK_FILE_INPUT"
 if [[ -z "$TASK_FILE" ]]; then
-  TASK_FILE="$(python3 - "$ART_DIR" <<'PY'
+  TASK_FILE="$("$PY" - "$ART_DIR" <<'PY'
 import sys
 from pathlib import Path
 
@@ -66,12 +74,12 @@ if [[ ! -f "$TASK_FILE" ]]; then
   exit 2
 fi
 
-TASK_FILE_ABS="$(python3 - "$TASK_FILE" <<'PY'
+TASK_FILE_ABS="$("$PY" - "$TASK_FILE" <<'PY'
 import os, sys
 print(os.path.realpath(sys.argv[1]))
 PY
 )"
-ROOT_ABS="$(python3 - "$ROOT" <<'PY'
+ROOT_ABS="$("$PY" - "$ROOT" <<'PY'
 import os, sys
 print(os.path.realpath(sys.argv[1]))
 PY
@@ -90,11 +98,14 @@ esac
 
 OUTDIR="$ART_DIR/replay_out"
 REPAIR_RETRIES="${REPLAY_REPAIR_RETRIES:-2}"
+PY_VER="$("$PY" -c 'import sys; print(sys.version.split()[0])')"
 set +e
-python3 batch_agent.py --chat --tasks-format blocks --repair-retries "$REPAIR_RETRIES" --replay-transcript "$TRANSCRIPT" --outdir "$OUTDIR" "$TASK_FILE_USE"
+"$PY" batch_agent.py --chat --tasks-format blocks --repair-retries "$REPAIR_RETRIES" --replay-transcript "$TRANSCRIPT" --outdir "$OUTDIR" "$TASK_FILE_USE"
 RC=$?
 set -e
 
+echo "python_path=$PY"
+echo "python_version=$PY_VER"
 echo "transcript_path=$TRANSCRIPT"
 echo "taskfile_path=$TASK_FILE_USE"
 echo "repair_retries=$REPAIR_RETRIES"

@@ -4,10 +4,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-if [[ -x ".venv/bin/pytest" ]]; then
-  .venv/bin/pytest -q
+if [[ -x "$ROOT/.venv/bin/python3" ]]; then
+  PY="$ROOT/.venv/bin/python3"
+  export PATH="$ROOT/.venv/bin:$PATH"
 else
-  python -m pytest -q
+  PY="python3"
 fi
+
+$PY -m pytest -q
 
 bash scripts/run_eval_pack.sh

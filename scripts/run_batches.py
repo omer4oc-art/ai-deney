@@ -4,6 +4,7 @@ import json
 import re
 import html
 import subprocess
+import sys
 from pathlib import Path
 
 KNOWN_GATE_KEYS = [
@@ -102,6 +103,7 @@ def main() -> int:
     ap.add_argument("--html", action="store_true")
     args = ap.parse_args()
 
+    repo_root = Path(__file__).resolve().parents[1]
     tasks_dir = Path(args.tasks_dir)
     outbase = Path(args.outbase)
     outbase.mkdir(parents=True, exist_ok=True)
@@ -118,9 +120,10 @@ def main() -> int:
 
     for idx, tf in enumerate(task_files, start=1):
         outdir = outbase / f"batch_{idx:03d}_{_slug(tf.stem)}"
+        outdir.mkdir(parents=True, exist_ok=True)
         cmd = [
-            "python3",
-            "batch_agent.py",
+            sys.executable,
+            str(repo_root / "batch_agent.py"),
             "--chat",
             "--tasks-format",
             "blocks",
@@ -137,7 +140,7 @@ def main() -> int:
         if args.bundle:
             cmd.append("--bundle")
 
-        p = subprocess.run(cmd, capture_output=True, text=True)
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=str(repo_root))
         code = int(p.returncode)
         if code != 0:
             any_fail = True
@@ -155,6 +158,8 @@ def main() -> int:
             "transcript": str(outdir / "transcript.jsonl") if (outdir / "transcript.jsonl").exists() else "",
             "bundle": str(outdir / "bundle.txt") if (outdir / "bundle.txt").exists() else "",
             "gate_counts": gates,
+            "stdout": p.stdout or "",
+            "stderr": p.stderr or "",
             "stdout_tail": "\n".join((p.stdout or "").splitlines()[-20:]),
             "stderr_tail": "\n".join((p.stderr or "").splitlines()[-20:]),
         }

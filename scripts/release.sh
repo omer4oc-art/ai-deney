@@ -39,9 +39,20 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+if [[ -x "$ROOT/.venv/bin/python3" ]]; then
+  PY="$ROOT/.venv/bin/python3"
+else
+  PY="python3"
+fi
+export RELEASE_PYTHON="$PY"
+
 if [[ -n "$(git status --porcelain)" ]]; then
-  echo "Working tree is dirty. Commit/stash changes before release." >&2
-  exit 1
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "warning: working tree is dirty; continuing because --dry-run was requested"
+  else
+    echo "Working tree is dirty. Commit/stash changes before release." >&2
+    exit 1
+  fi
 fi
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
