@@ -1,0 +1,3 @@
+# PY_CONTRACT: strict substring rules
+forbid: ```
+forbid: TODO

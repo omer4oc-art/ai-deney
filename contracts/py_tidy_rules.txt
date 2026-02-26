@@ -1,0 +1,4 @@
+# PY_CONTRACT: tidy substring rules
+forbid: if not True
+forbid: never be reached
+forbid: isinstance((), tuple)
