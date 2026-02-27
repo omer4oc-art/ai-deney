@@ -1,0 +1,3 @@
+report_date,reservationId,source,gross,net,currencyCode,agencyCode,agencyLabel,extra_col
+2025-01-01,HR1,Booking.com,100.00,90.00,USD,AG001,Atlas Partners,foo
+2025-01-02,HR2,Direct,50.00,45.00,USD,DIRECT,Direct Channel,bar
