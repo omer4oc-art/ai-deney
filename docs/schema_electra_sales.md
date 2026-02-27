@@ -41,3 +41,4 @@ Each row uses the stable schema below.
 - They come from `sales_summary_<year>.csv`.
 - Agency rows come from `sales_by_agency_<year>.csv`.
 - During normalization, both sources can be merged into the same yearly file.
+- Agency rows are the canonical dimension used for reconciliation-by-agency (`dim_value = agency_id`).
