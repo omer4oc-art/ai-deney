@@ -30,15 +30,23 @@ def validate_agency_totals_match_summary(rows: list[dict], tolerance: float = 1e
     """
     Validate per-year integrity:
     sum(non-TOTAL agencies) == TOTAL row.
+
+    This cross-check runs only when both sides exist in a year:
+    - at least one TOTAL row
+    - at least one non-TOTAL row
+
+    If only one side exists (summary-only or agency-only dataset), the check is
+    skipped for that year.
     """
     years = sorted({int(r["year"]) for r in rows})
     for year in years:
         year_rows = [r for r in rows if int(r["year"]) == year]
         summary_rows = [r for r in year_rows if r["agency_id"] == TOTAL_AGENCY_ID]
-        if not summary_rows:
-            raise ValueError(f"missing TOTAL row for year={year}")
+        agency_rows = [r for r in year_rows if r["agency_id"] != TOTAL_AGENCY_ID]
+        if not summary_rows or not agency_rows:
+            continue
         total_gross = sum(float(r["gross_sales"]) for r in summary_rows)
-        agency_gross = sum(float(r["gross_sales"]) for r in year_rows if r["agency_id"] != TOTAL_AGENCY_ID)
+        agency_gross = sum(float(r["gross_sales"]) for r in agency_rows)
         if abs(total_gross - agency_gross) > tolerance:
             raise ValueError(
                 f"agency totals mismatch for year={year}: agencies={agency_gross:.6f} total={total_gross:.6f}"
@@ -64,4 +72,3 @@ def read_normalized_rows(years: list[int], normalized_root: Path) -> list[dict]:
                     }
                 )
     return rows
-
