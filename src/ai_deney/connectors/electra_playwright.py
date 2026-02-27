@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from urllib.request import urlopen
 
 from .electra_base import ElectraConnectorBase
 
@@ -81,6 +82,7 @@ class ElectraPlaywrightConnector(ElectraConnectorBase):
         raise RuntimeError(f"portal download failed for {report_type}/{year}: {last_exc}") from last_exc
 
     def _download_once(self, report_type: str, year: int, variant: str, dst: Path, attempt: int) -> None:
+        self._probe_portal_health()
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # pragma: no cover - dependency gate
@@ -117,6 +119,20 @@ class ElectraPlaywrightConnector(ElectraConnectorBase):
             finally:
                 context.close()
                 browser.close()
+
+    def _probe_portal_health(self) -> None:
+        health_url = f"{self.portal_base_url}/health"
+        try:
+            with urlopen(health_url, timeout=2.0) as response:  # nosec B310 - trusted local portal URL
+                status = int(getattr(response, "status", 200))
+                if status >= 400:
+                    raise RuntimeError(f"health probe returned HTTP {status}")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Electra Test Portal not reachable at {self.portal_base_url}. "
+                "Start it with: bash scripts/run_electra_test_portal.sh "
+                f"(details: {exc})"
+            ) from exc
 
     def _save_failure_screenshot(self, page, report_type: str, year: int, attempt: int) -> None:
         if page is None:

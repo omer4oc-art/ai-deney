@@ -1,9 +1,11 @@
-import sys
-from pathlib import Path
+import os
+import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+@pytest.fixture(autouse=True)
+def _force_deterministic_connectors(monkeypatch):
+    # Never allow unit tests to depend on a running portal/browser.
+    monkeypatch.setenv("AI_DENEY_ELECTRA_CONNECTOR", "mock")
+    monkeypatch.delenv("AI_DENEY_ELECTRA_PORTAL_URL", raising=False)
+    monkeypatch.delenv("AI_DENEY_ELECTRA_PORTAL_USERNAME", raising=False)
+    monkeypatch.delenv("AI_DENEY_ELECTRA_PORTAL_PASSWORD", raising=False)
+    monkeypatch.delenv("AI_DENEY_ELECTRA_EXPORT_VARIANT", raising=False)

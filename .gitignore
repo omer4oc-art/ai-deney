@@ -82,6 +82,7 @@ docs/*
 !docs/INBOX_WATCHER.md
 !docs/EXPORT_CONTRACT.md
 !docs/ELECTRA_TEST_PORTAL.md
+!docs/PORTAL_E2E.md
 outputs/
 
 # inbox drop-folder payloads (never commit real exports)

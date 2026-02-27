@@ -1,6 +1,7 @@
 import csv
 import importlib.util
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -46,6 +47,9 @@ def test_portal_playwright_download_and_normalize(tmp_path: Path) -> None:
         pytest.skip("portal integration requires playwright")
 
     repo_root = Path(__file__).resolve().parents[1]
+    work_root = repo_root / "tests" / "_tmp_tasks" / "electra_portal_playwright_integration"
+    shutil.rmtree(work_root, ignore_errors=True)
+    work_root.mkdir(parents=True, exist_ok=True)
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
 
@@ -77,11 +81,11 @@ def test_portal_playwright_download_and_normalize(tmp_path: Path) -> None:
 
         connector = ElectraPlaywrightConnector(
             repo_root=repo_root,
-            raw_root=tmp_path / "raw",
+            raw_root=work_root / "raw",
             portal_base_url=base_url,
             username="demo",
             password="demo123",
-            screenshot_root=tmp_path / "screenshots",
+            screenshot_root=work_root / "screenshots",
             timeout_ms=12000,
             max_retries=1,
         )
