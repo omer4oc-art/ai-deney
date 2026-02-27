@@ -9,6 +9,8 @@ NORMALIZED_COLUMNS = [
     "date",
     "year",
     "booking_id",
+    "agency_id",
+    "agency_name",
     "channel",
     "gross_sales",
     "net_sales",
@@ -19,6 +21,16 @@ _REQUIRED_BASE_COLUMNS = {"date", "gross_sales", "net_sales", "currency"}
 _ID_COLUMNS = ("booking_id", "invoice_id")
 _CHANNEL_COLUMNS = ("channel", "agency")
 
+_CHANNEL_TO_AGENCY: dict[str, tuple[str, str]] = {
+    "direct": ("DIRECT", "Direct Channel"),
+    "booking.com": ("AG001", "Atlas Partners"),
+    "expedia": ("AG002", "Beacon Agency"),
+    "agoda": ("AG003", "Cedar Travel"),
+    "hotelbeds": ("AG004", "Drift Voyages"),
+    "wholesaler": ("AG005", "Elm Holidays"),
+    "wholesalerx": ("AG005", "Elm Holidays"),
+}
+
 
 def _pick_column(row: dict, candidates: tuple[str, ...], label: str) -> str:
     for name in candidates:
@@ -27,6 +39,44 @@ def _pick_column(row: dict, candidates: tuple[str, ...], label: str) -> str:
             return str(value).strip()
     joined = ", ".join(candidates)
     raise ValueError(f"missing required {label} column (expected one of: {joined})")
+
+
+def _safe_str(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _normalize_agency_id(raw: str) -> str:
+    out = []
+    for ch in raw.upper():
+        if ch.isalnum():
+            out.append(ch)
+        elif ch in {" ", "-", ".", "/", "&"}:
+            out.append("_")
+    cleaned = "".join(out).strip("_")
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    return cleaned or "UNKNOWN"
+
+
+def _resolve_agency(row: dict, channel: str) -> tuple[str, str]:
+    agency_id = _safe_str(row.get("agency_id"))
+    agency_name = _safe_str(row.get("agency_name"))
+    if agency_id and agency_name:
+        return agency_id, agency_name
+
+    mapped = _CHANNEL_TO_AGENCY.get(channel.lower())
+    if mapped:
+        default_id, default_name = mapped
+    else:
+        default_id, default_name = _normalize_agency_id(channel), channel or "Unknown Agency"
+
+    if not agency_id:
+        agency_id = default_id
+    if not agency_name:
+        agency_name = default_name
+    return agency_id, agency_name
 
 
 def _validate_required_input_columns(fieldnames: list[str] | None) -> None:
@@ -54,12 +104,16 @@ def parse_daily_sales_csv(path: Path) -> list[dict]:
         for row in reader:
             date = str(row["date"]).strip()
             year = int(date.split("-", 1)[0])
+            channel = _pick_column(row, _CHANNEL_COLUMNS, "channel")
+            agency_id, agency_name = _resolve_agency(row, channel=channel)
             rows.append(
                 {
                     "date": date,
                     "year": year,
                     "booking_id": _pick_column(row, _ID_COLUMNS, "id"),
-                    "channel": _pick_column(row, _CHANNEL_COLUMNS, "channel"),
+                    "agency_id": agency_id,
+                    "agency_name": agency_name,
+                    "channel": channel,
                     "gross_sales": float(row["gross_sales"]),
                     "net_sales": float(row["net_sales"]),
                     "currency": (row.get("currency") or "USD").strip() or "USD",
@@ -118,7 +172,9 @@ def write_normalized_yearly(records: list[dict], output_root: Path) -> list[Path
                             "date": row["date"],
                             "year": int(row["year"]),
                             "booking_id": row["booking_id"],
-                            "channel": row["channel"],
+                            "agency_id": row.get("agency_id", ""),
+                            "agency_name": row.get("agency_name", ""),
+                            "channel": row.get("channel") or row.get("agency_name") or "",
                             "gross_sales": float(row["gross_sales"]),
                             "net_sales": float(row.get("net_sales", "") or 0.0),
                             "currency": row.get("currency", "USD") or "USD",
@@ -138,6 +194,8 @@ def write_normalized_yearly(records: list[dict], output_root: Path) -> list[Path
                         "date": row["date"],
                         "year": int(row["year"]),
                         "booking_id": row["booking_id"],
+                        "agency_id": row["agency_id"],
+                        "agency_name": row["agency_name"],
                         "channel": row["channel"],
                         "gross_sales": f"{float(row['gross_sales']):.2f}",
                         "net_sales": f"{float(row['net_sales']):.2f}",
