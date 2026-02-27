@@ -1,0 +1,5 @@
+date,agency_id,agency_name,gross_sales,net_sales,currency
+2026-12-31,AG001,Atlas Partners,500.00,450.00,USD
+2026-12-31,AG002,Beacon Agency,450.00,405.00,USD
+2026-12-31,DIRECT,Direct Channel,350.00,315.00,USD
+
