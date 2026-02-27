@@ -7,8 +7,15 @@ from html import escape
 from pathlib import Path
 
 from ai_deney.intent.query_spec import QuerySpec
-from ai_deney.mapping.health import drift_report, find_collisions, find_unmapped
-from ai_deney.mapping.loader import enrich_rows, load_mapping_bundle
+from ai_deney.mapping.health import (
+    drift_report,
+    find_collisions,
+    find_unmapped,
+    sample_mapped_rows,
+    suggest_unmapped_candidates,
+)
+from ai_deney.mapping.loader import MappingBundle, enrich_rows, load_mapping_bundle
+from ai_deney.mapping.metrics import unknown_rate_improvement_by_year
 from ai_deney.reports.reconcile_reports import ensure_normalized_data
 from ai_deney.reports.registry import ReportRegistry
 
@@ -67,15 +74,21 @@ def _enriched_rows(
     normalized_root: Path,
     mapping_agencies_path: Path | None = None,
     mapping_channels_path: Path | None = None,
-) -> tuple[list[dict], list[dict], list[dict]]:
+    mapping_rules_path: Path | None = None,
+) -> tuple[list[dict], list[dict], list[dict], MappingBundle]:
     mapping = load_mapping_bundle(
         mapping_agencies_path=mapping_agencies_path,
         mapping_channels_path=mapping_channels_path,
+        mapping_rules_path=mapping_rules_path,
     )
     electra_rows = enrich_rows(_read_electra_rows(years, normalized_root), source_system="electra", mapping=mapping)
     hr_rows = enrich_rows(_read_hotelrunner_rows(years, normalized_root), source_system="hotelrunner", mapping=mapping)
+    for row in electra_rows:
+        row["system"] = "electra"
+    for row in hr_rows:
+        row["system"] = "hotelrunner"
     collisions = find_collisions(mapping)
-    return electra_rows, hr_rows, collisions
+    return electra_rows, hr_rows, collisions, mapping
 
 
 def run_mapping_health_agency(
@@ -83,13 +96,15 @@ def run_mapping_health_agency(
     normalized_root: Path | None = None,
     mapping_agencies_path: Path | None = None,
     mapping_channels_path: Path | None = None,
+    mapping_rules_path: Path | None = None,
 ) -> dict:
     normalized = (normalized_root or _default_normalized_root()).resolve()
-    electra_rows, hr_rows, collisions = _enriched_rows(
+    electra_rows, hr_rows, collisions, mapping = _enriched_rows(
         years,
         normalized_root=normalized,
         mapping_agencies_path=mapping_agencies_path,
         mapping_channels_path=mapping_channels_path,
+        mapping_rules_path=mapping_rules_path,
     )
 
     unmapped = [
@@ -107,7 +122,11 @@ def run_mapping_health_agency(
 
     agency_collisions = [r for r in collisions if str(r.get("mapping_type")) == "agency"]
     drift = drift_report(electra_rows, hr_rows)
+    mapped_sample = sample_mapped_rows(electra_rows + hr_rows, limit=20)
+    unmapped_suggestions = suggest_unmapped_candidates(unmapped, mapping=mapping, max_candidates=3)
     return {
+        "sample_mapped": mapped_sample,
+        "unmapped_suggestions": unmapped_suggestions,
         "unmapped": unmapped,
         "collisions": agency_collisions,
         "drift": drift,
@@ -119,13 +138,15 @@ def run_mapping_health_channel(
     normalized_root: Path | None = None,
     mapping_agencies_path: Path | None = None,
     mapping_channels_path: Path | None = None,
+    mapping_rules_path: Path | None = None,
 ) -> dict:
     normalized = (normalized_root or _default_normalized_root()).resolve()
-    electra_rows, hr_rows, collisions = _enriched_rows(
+    electra_rows, hr_rows, collisions, _ = _enriched_rows(
         years,
         normalized_root=normalized,
         mapping_agencies_path=mapping_agencies_path,
         mapping_channels_path=mapping_channels_path,
+        mapping_rules_path=mapping_rules_path,
     )
     unmapped = [
         r
@@ -140,10 +161,59 @@ def run_mapping_health_channel(
     )
     channel_collisions = [r for r in collisions if str(r.get("mapping_type")) == "channel"]
     return {
+        "sample_mapped": [],
+        "unmapped_suggestions": [],
         "unmapped": unmapped,
         "collisions": channel_collisions,
         "drift": [],
     }
+
+
+def run_mapping_explain_agency(
+    years: list[int],
+    normalized_root: Path | None = None,
+    mapping_agencies_path: Path | None = None,
+    mapping_channels_path: Path | None = None,
+    mapping_rules_path: Path | None = None,
+) -> dict:
+    normalized = (normalized_root or _default_normalized_root()).resolve()
+    electra_rows, hr_rows, _collisions, mapping = _enriched_rows(
+        years,
+        normalized_root=normalized,
+        mapping_agencies_path=mapping_agencies_path,
+        mapping_channels_path=mapping_channels_path,
+        mapping_rules_path=mapping_rules_path,
+    )
+    unmapped = [
+        r
+        for r in (find_unmapped(electra_rows, "electra") + find_unmapped(hr_rows, "hotelrunner"))
+        if str(r.get("item_type")) == "agency"
+    ]
+    mapped_sample = sample_mapped_rows(electra_rows + hr_rows, limit=25)
+    unmapped_suggestions = suggest_unmapped_candidates(unmapped, mapping=mapping, max_candidates=3)
+    return {
+        "sample_mapped": mapped_sample,
+        "unmapped_suggestions": unmapped_suggestions,
+    }
+
+
+def run_unknown_rate_improvement(
+    years: list[int],
+    normalized_root: Path | None = None,
+    mapping_agencies_path: Path | None = None,
+    mapping_channels_path: Path | None = None,
+    mapping_rules_path: Path | None = None,
+) -> dict:
+    normalized = (normalized_root or _default_normalized_root()).resolve()
+    rows = unknown_rate_improvement_by_year(
+        years=years,
+        normalized_root=normalized,
+        granularity="monthly",
+        mapping_agencies_path=mapping_agencies_path,
+        mapping_channels_path=mapping_channels_path,
+        mapping_rules_path=mapping_rules_path,
+    )
+    return {"improvement": rows}
 
 
 def _format_value(value) -> str:
@@ -180,9 +250,12 @@ def _render_table_html(rows: list[dict]) -> list[str]:
 def render_markdown(report: dict, title: str, notes: str, sections: list[str]) -> str:
     lines = [f"# {title}", "", notes, ""]
     section_titles = {
+        "sample_mapped": "Mapped Decisions Sample",
+        "unmapped_suggestions": "Unmapped Suggestions",
         "unmapped": "Unmapped",
         "collisions": "Collisions",
         "drift": "Drift",
+        "improvement": "Unknown Rate Improvement",
     }
     for key in sections:
         lines.append(f"## {section_titles[key]}")
@@ -212,9 +285,12 @@ def render_html(report: dict, title: str, notes: str, sections: list[str]) -> st
         f"<p>{escape(notes)}</p>",
     ]
     section_titles = {
+        "sample_mapped": "Mapped Decisions Sample",
+        "unmapped_suggestions": "Unmapped Suggestions",
         "unmapped": "Unmapped",
         "collisions": "Collisions",
         "drift": "Drift",
+        "improvement": "Unknown Rate Improvement",
     }
     for key in sections:
         lines.append(f"<h2>{escape(section_titles[key])}</h2>")
@@ -234,6 +310,7 @@ def _build_registry(
     normalized_root: Path | None = None,
     mapping_agencies_path: Path | None = None,
     mapping_channels_path: Path | None = None,
+    mapping_rules_path: Path | None = None,
 ) -> ReportRegistry:
     registry = ReportRegistry()
     registry.register(
@@ -243,6 +320,7 @@ def _build_registry(
             normalized_root=normalized_root,
             mapping_agencies_path=mapping_agencies_path,
             mapping_channels_path=mapping_channels_path,
+            mapping_rules_path=mapping_rules_path,
         ),
     )
     registry.register(
@@ -252,6 +330,27 @@ def _build_registry(
             normalized_root=normalized_root,
             mapping_agencies_path=mapping_agencies_path,
             mapping_channels_path=mapping_channels_path,
+            mapping_rules_path=mapping_rules_path,
+        ),
+    )
+    registry.register(
+        "mapping.explain_agency",
+        lambda years: run_mapping_explain_agency(
+            years,
+            normalized_root=normalized_root,
+            mapping_agencies_path=mapping_agencies_path,
+            mapping_channels_path=mapping_channels_path,
+            mapping_rules_path=mapping_rules_path,
+        ),
+    )
+    registry.register(
+        "mapping.unknown_rate_improvement",
+        lambda years: run_unknown_rate_improvement(
+            years,
+            normalized_root=normalized_root,
+            mapping_agencies_path=mapping_agencies_path,
+            mapping_channels_path=mapping_channels_path,
+            mapping_rules_path=mapping_rules_path,
         ),
     )
     return registry
@@ -270,18 +369,32 @@ def answer_from_spec(spec: QuerySpec, normalized_root: Path | None = None, outpu
         title = f"Mapping Health by Channel ({years_label})"
         notes = f"Canonical channel mapping health for years: {years_label}."
         sections = ["unmapped", "collisions"]
+    elif spec.analysis == "mapping_explain_agency":
+        title = f"Mapping Explainability by Agency ({years_label})"
+        notes = (
+            f"Deterministic mapping decisions and unmapped candidate suggestions for years: {years_label}. "
+            "Rules are applied only after explicit CSV matches."
+        )
+        sections = ["sample_mapped", "unmapped_suggestions"]
+    elif spec.analysis == "mapping_unknown_rate_improvement":
+        title = f"Unknown Rate Improvement by Mapping ({years_label})"
+        notes = (
+            f"UNKNOWN share comparison for monthly reconcile-by-agency in years: {years_label}. "
+            "Baseline uses raw source-native dim values; mapped uses canonical mapping v2."
+        )
+        sections = ["improvement"]
     elif spec.analysis == "mapping_unmapped_agency":
         title = f"Unmapped Agencies ({years_label})"
         notes = f"Agencies missing canonical mappings for years: {years_label}."
-        sections = ["unmapped"]
+        sections = ["unmapped", "unmapped_suggestions"]
     elif spec.analysis == "mapping_drift_agency":
         title = f"Agency Drift Electra vs HotelRunner ({years_label})"
         notes = f"Canonical agency drift for years: {years_label}."
         sections = ["drift"]
     else:
         title = f"Mapping Health by Agency ({years_label})"
-        notes = f"Canonical agency mapping health for years: {years_label}."
-        sections = ["unmapped", "collisions", "drift"]
+        notes = f"Canonical agency mapping health for years: {years_label}. Includes mapping explainability samples."
+        sections = ["sample_mapped", "unmapped_suggestions", "unmapped", "collisions", "drift"]
 
     if output_format == "markdown":
         return render_markdown(report=report, title=title, notes=notes, sections=sections)

@@ -223,3 +223,115 @@ def drift_report(electra_rows: list[dict], hr_rows: list[dict]) -> list[dict]:
         )
 
     return out
+
+
+def _token_set(value: str) -> set[str]:
+    normalized = normalize_name(value)
+    if not normalized:
+        return set()
+    return {token for token in normalized.split(" ") if token}
+
+
+def _token_overlap_score(left: str, right: str) -> float:
+    left_tokens = _token_set(left)
+    right_tokens = _token_set(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    union = left_tokens | right_tokens
+    if not union:
+        return 0.0
+    intersection = left_tokens & right_tokens
+    return float(len(intersection)) / float(len(union))
+
+
+def sample_mapped_rows(rows: list[dict], limit: int = 20) -> list[dict]:
+    """Return a deterministic sample of rows with canonical mapping decisions."""
+    mapped = [
+        {
+            "system": str(row.get("system") or "").strip(),
+            "year": int(row.get("year", 0) or 0),
+            "date": str(row.get("date") or "").strip(),
+            "source_agency_id": str(row.get("agency_id") or "").strip(),
+            "source_agency_name": str(row.get("agency_name") or row.get("agency") or "").strip(),
+            "source_channel": str(row.get("channel") or "").strip(),
+            "canon_agency_id": str(row.get("canon_agency_id") or "").strip(),
+            "canon_agency_name": str(row.get("canon_agency_name") or "").strip(),
+            "mapped_by": str(row.get("mapped_by") or "").strip(),
+        }
+        for row in rows
+        if (str(row.get("canon_agency_id") or "").strip() or str(row.get("canon_agency_name") or "").strip())
+    ]
+    mapped.sort(
+        key=lambda r: (
+            str(r["system"]),
+            int(r["year"]),
+            str(r["date"]),
+            str(r["source_agency_id"]),
+            str(r["source_agency_name"]),
+            str(r["source_channel"]),
+            str(r["canon_agency_id"]),
+            str(r["mapped_by"]),
+        )
+    )
+    return mapped[: max(0, int(limit))]
+
+
+def suggest_unmapped_candidates(
+    unmapped_rows: list[dict],
+    mapping: MappingBundle,
+    max_candidates: int = 3,
+) -> list[dict]:
+    """
+    Suggest deterministic canonical candidates for unmapped agency rows.
+
+    Similarity is token-overlap between source agency text and canonical agency name.
+    """
+    max_n = max(1, int(max_candidates))
+    by_system: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    seen_per_system: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for entry in mapping.agency_entries:
+        key = (entry.canon_agency_id, entry.canon_agency_name)
+        if key in seen_per_system[entry.source_system]:
+            continue
+        seen_per_system[entry.source_system].add(key)
+        by_system[entry.source_system].append(key)
+
+    for system in by_system:
+        by_system[system].sort(key=lambda x: (str(x[0]), str(x[1])))
+
+    out: list[dict] = []
+    for row in unmapped_rows:
+        if str(row.get("item_type")) != "agency":
+            continue
+        system = str(row.get("system") or "").strip().lower()
+        source_name = str(row.get("source_agency_name") or row.get("source_agency_id") or "").strip()
+        candidates = by_system.get(system, [])
+        scored = []
+        for canon_id, canon_name in candidates:
+            score = _token_overlap_score(source_name, canon_name)
+            scored.append((score, canon_id, canon_name))
+        scored.sort(key=lambda x: (-float(x[0]), str(x[1]), str(x[2])))
+
+        suggested_items: list[str] = []
+        for score, canon_id, canon_name in scored[:max_n]:
+            suggested_items.append(f"{canon_id}/{canon_name} ({score:.2f})")
+
+        out.append(
+            {
+                "system": system,
+                "source_agency_id": str(row.get("source_agency_id") or "").strip(),
+                "source_agency_name": str(row.get("source_agency_name") or "").strip(),
+                "occurrences": int(row.get("occurrences", 0) or 0),
+                "years": str(row.get("years") or "").strip(),
+                "suggested_candidates": "; ".join(suggested_items),
+            }
+        )
+
+    out.sort(
+        key=lambda r: (
+            str(r["system"]),
+            str(r["source_agency_id"]),
+            str(r["source_agency_name"]),
+        )
+    )
+    return out

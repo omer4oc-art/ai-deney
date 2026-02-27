@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ai_deney.mapping.rules import AgencyRule, apply_agency_rules, default_mapping_rules_path, load_agency_rules
+
 _VALID_SYSTEMS = {"electra", "hotelrunner"}
 _VALID_CANON_CHANNELS = {"DIRECT", "WEB", "WALKIN", "OTA", "AGENCY"}
 
@@ -37,6 +39,7 @@ class MappingBundle:
     agency_by_id: dict[tuple[str, str], AgencyMappingEntry]
     agency_by_name: dict[tuple[str, str], AgencyMappingEntry]
     channel_by_value: dict[tuple[str, str], ChannelMappingEntry]
+    agency_rules: list[AgencyRule]
 
 
 def _repo_root() -> Path:
@@ -175,6 +178,7 @@ def _load_agency_entries(path: Path) -> MappingBundle:
         agency_by_id=agency_by_id,
         agency_by_name=agency_by_name,
         channel_by_value={},
+        agency_rules=[],
     )
 
 
@@ -227,10 +231,12 @@ def _load_channel_entries(path: Path) -> tuple[list[ChannelMappingEntry], dict[t
 def load_mapping_bundle(
     mapping_agencies_path: Path | None = None,
     mapping_channels_path: Path | None = None,
+    mapping_rules_path: Path | None = None,
 ) -> MappingBundle:
     """Load canonical mapping files with strict deterministic validation."""
     agencies_path = (mapping_agencies_path or default_mapping_agencies_path()).resolve()
     channels_path = (mapping_channels_path or default_mapping_channels_path()).resolve()
+    rules_path = (mapping_rules_path or default_mapping_rules_path()).resolve()
     _ensure_within_repo(agencies_path)
     if not agencies_path.exists():
         raise ValueError(f"agency mapping file not found: {agencies_path}")
@@ -243,13 +249,60 @@ def load_mapping_bundle(
         _ensure_within_repo(channels_path)
         channel_entries, channel_by_value = _load_channel_entries(channels_path)
 
+    agency_rules = load_agency_rules(mapping_rules_path=rules_path)
+
     return MappingBundle(
         agency_entries=bundle.agency_entries,
         channel_entries=channel_entries,
         agency_by_id=bundle.agency_by_id,
         agency_by_name=bundle.agency_by_name,
         channel_by_value=channel_by_value,
+        agency_rules=agency_rules,
     )
+
+
+def match_agency_with_reason(
+    mapping: MappingBundle,
+    source_system: str,
+    source_agency_id: str | None,
+    source_agency_name: str | None,
+    source_channel: str | None = None,
+) -> tuple[str, str, str] | None:
+    """
+    Match an agency with explainable reason.
+
+    Precedence:
+    1) explicit CSV by source id
+    2) explicit CSV by normalized source name (only when id is missing)
+    3) deterministic ordered rules
+    """
+    system = _normalize_system(source_system)
+    source_id = _normalize_source_id(source_agency_id or "")
+    source_name_norm = normalize_name(source_agency_name or "")
+    source_name = str(source_agency_name or "").strip()
+    source_channel_clean = str(source_channel or "").strip()
+
+    if source_id:
+        entry = mapping.agency_by_id.get((system, source_id))
+        if entry:
+            return entry.canon_agency_id, entry.canon_agency_name, "csv_match:id"
+    else:
+        if source_name_norm:
+            entry = mapping.agency_by_name.get((system, source_name_norm))
+            if entry:
+                return entry.canon_agency_id, entry.canon_agency_name, "csv_match:name"
+
+    rule_match = apply_agency_rules(
+        rules=mapping.agency_rules,
+        source_system=system,
+        source_agency_id=source_id,
+        source_agency_name=source_name,
+        source_channel=source_channel_clean,
+    )
+    if rule_match is not None:
+        return rule_match.canon_agency_id, rule_match.canon_agency_name, rule_match.reason
+
+    return None
 
 
 def match_agency(
@@ -257,25 +310,19 @@ def match_agency(
     source_system: str,
     source_agency_id: str | None,
     source_agency_name: str | None,
+    source_channel: str | None = None,
 ) -> tuple[str, str] | None:
-    """Match an agency by id; fallback to normalized name only when id is missing."""
-    system = _normalize_system(source_system)
-    source_id = _normalize_source_id(source_agency_id or "")
-    source_name_norm = normalize_name(source_agency_name or "")
-
-    if source_id:
-        entry = mapping.agency_by_id.get((system, source_id))
-        if not entry:
-            return None
-        return entry.canon_agency_id, entry.canon_agency_name
-
-    if source_name_norm:
-        entry = mapping.agency_by_name.get((system, source_name_norm))
-        if not entry:
-            return None
-        return entry.canon_agency_id, entry.canon_agency_name
-
-    return None
+    """Match an agency by explicit CSV, then deterministic rules."""
+    match = match_agency_with_reason(
+        mapping=mapping,
+        source_system=source_system,
+        source_agency_id=source_agency_id,
+        source_agency_name=source_agency_name,
+        source_channel=source_channel,
+    )
+    if match is None:
+        return None
+    return match[0], match[1]
 
 
 def match_channel(
@@ -306,20 +353,23 @@ def enrich_row(row: dict, source_system: str, mapping: MappingBundle) -> dict:
     out = dict(row)
     source_id = str(row.get("agency_id") or "").strip()
     source_name = str(row.get("agency_name") or row.get("agency") or "").strip()
-    agency_match = match_agency(
+    source_channel = str(row.get("channel") or "").strip()
+    agency_match = match_agency_with_reason(
         mapping=mapping,
         source_system=source_system,
         source_agency_id=source_id,
         source_agency_name=source_name,
+        source_channel=source_channel,
     )
     if agency_match:
         out["canon_agency_id"] = agency_match[0]
         out["canon_agency_name"] = agency_match[1]
+        out["mapped_by"] = agency_match[2]
     else:
         out["canon_agency_id"] = ""
         out["canon_agency_name"] = ""
+        out["mapped_by"] = "unmapped"
 
-    source_channel = str(row.get("channel") or "").strip()
     canon_channel = match_channel(
         mapping=mapping,
         source_system=source_system,
