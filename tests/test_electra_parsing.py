@@ -1,4 +1,6 @@
 import csv
+import subprocess
+import sys
 from pathlib import Path
 
 from ai_deney.parsing.electra_sales import (
@@ -45,3 +47,19 @@ def test_pdf_parsing_works_for_generated_sample(tmp_path: Path) -> None:
     assert rows[0]["gross_sales"] == 1000.0
     assert rows[1]["net_sales"] == 1170.0
 
+
+def test_make_fixture_pdf_cli_custom_out_and_parse(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    out_path = tmp_path / "fixture_cli.pdf"
+    p = subprocess.run(
+        [sys.executable, "scripts/make_fixture_pdf.py", "--out", str(out_path)],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    assert p.returncode == 0, f"stdout={p.stdout}\nstderr={p.stderr}"
+    assert out_path.exists()
+    assert f"WROTE: {out_path.resolve()}" in p.stdout
+    rows = parse_sales_summary_pdf(out_path)
+    assert len(rows) == 2
+    assert [r["year"] for r in rows] == [2025, 2026]

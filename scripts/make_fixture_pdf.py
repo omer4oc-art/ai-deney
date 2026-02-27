@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import argparse
+import sys
 from pathlib import Path
 
 
@@ -72,15 +74,35 @@ def build_pdf_bytes(lines: list[str]) -> bytes:
     return bytes(out)
 
 
-def main() -> int:
+def _default_out_path() -> Path:
     repo_root = Path(__file__).resolve().parents[1]
-    out_path = repo_root / "fixtures" / "electra" / "sales_summary_sample.pdf"
+    return repo_root / "fixtures" / "electra" / "sales_summary_sample.pdf"
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate deterministic Electra sample PDF fixture.")
+    parser.add_argument(
+        "--out",
+        default=str(_default_out_path()),
+        help="Output PDF path (default: fixtures/electra/sales_summary_sample.pdf)",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = _parse_args()
+    out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(build_pdf_bytes(TABLE_LINES))
-    print(out_path)
+    print(f"WROTE: {out_path.resolve()}")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
-
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1)
