@@ -14,6 +14,8 @@ _SUPPORTED_EXAMPLES = [
     "sales by month for 2025",
     "top agencies in 2026",
     "share of direct vs agencies in 2025",
+    "compare electra vs hotelrunner for 2025",
+    "where do electra and hotelrunner differ in 2026",
 ]
 
 
@@ -53,27 +55,41 @@ def parse_electra_query(text: str) -> QuerySpec:
     is_by_month = ("sales by month" in lowered) or ("monthly sales" in lowered) or ("by month" in lowered)
     is_top_agencies = ("top agencies" in lowered) or ("top agency" in lowered)
     is_direct_share = ("share" in lowered) and ("direct" in lowered) and has_agency
+    mentions_electra = "electra" in lowered
+    mentions_hotelrunner = ("hotelrunner" in lowered) or ("hotel runner" in lowered)
+    asks_reconcile = ("differ" in lowered) or ("difference" in lowered) or compare
+    is_reconciliation = mentions_electra and mentions_hotelrunner and asks_reconcile
 
-    if is_by_month:
+    if is_reconciliation:
+        report = "sales_summary"
+        group_by = None
+        analysis = "reconcile_daily"
+        source = "reconcile"
+    elif is_by_month:
         report = "sales_summary"
         group_by = "month"
         analysis = "sales_by_month"
+        source = "electra"
     elif is_top_agencies:
         report = "sales_by_agency"
         group_by = "agency"
         analysis = "top_agencies"
+        source = "electra"
     elif is_direct_share:
         report = "sales_by_agency"
         group_by = "agency"
         analysis = "direct_share"
+        source = "electra"
     elif categorized_agency or has_agency:
         report = "sales_by_agency"
         group_by = "agency"
         analysis = "sales_by_agency"
+        source = "electra"
     elif ("sales data" in lowered) or ("sales summary" in lowered):
         report = "sales_summary"
         group_by = None
         analysis = "sales_summary"
+        source = "electra"
     else:
         supported = "\n".join(f"- {s}" for s in _SUPPORTED_EXAMPLES)
         raise ValueError(f"Unsupported query. Supported examples:\n{supported}")
@@ -85,5 +101,6 @@ def parse_electra_query(text: str) -> QuerySpec:
         output_format="markdown",
         compare=compare,
         analysis=analysis,
+        source=source,
         original_text=cleaned,
     )

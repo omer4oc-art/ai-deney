@@ -26,7 +26,9 @@ def test_generate_truth_pack_script_creates_index_and_bundle() -> None:
     assert "Q1" in index_text
     assert ".md" in index_text
     assert ".html" in index_text
+    assert "compare electra vs hotelrunner for 2025" in index_text
 
     bundle_text = bundle_path.read_text(encoding="utf-8")
     assert "===== FILE: index.md =====" in bundle_text
     assert "Data freshness / source: Source: Electra mock fixtures; Generated: deterministic run." in bundle_text
+    assert "Data freshness / source: Source: Electra + HotelRunner mock fixtures; Generated: deterministic run." in bundle_text

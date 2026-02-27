@@ -77,6 +77,7 @@ random_*.py
 docs/*
 !docs/DEBUGGING.md
 !docs/RELEASING.md
+!docs/schema_electra_sales.md
 outputs/
 
 # local runner

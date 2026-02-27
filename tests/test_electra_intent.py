@@ -54,3 +54,17 @@ def test_parse_direct_share_pattern() -> None:
 def test_parse_unsupported_query_lists_examples() -> None:
     with pytest.raises(ValueError, match="Unsupported query. Supported examples"):
         parse_electra_query("show me operational metrics for 2025")
+
+
+def test_parse_reconciliation_patterns() -> None:
+    spec = parse_electra_query("compare electra vs hotelrunner for 2025")
+    assert spec.source == "reconcile"
+    assert spec.analysis == "reconcile_daily"
+    assert spec.registry_key == "reconcile.daily"
+    assert spec.years == [2025]
+
+    spec2 = parse_electra_query("where do electra and hotelrunner differ in 2026")
+    assert spec2.source == "reconcile"
+    assert spec2.analysis == "reconcile_daily"
+    assert spec2.registry_key == "reconcile.daily"
+    assert spec2.years == [2026]

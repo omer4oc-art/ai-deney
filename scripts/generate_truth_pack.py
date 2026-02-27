@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate deterministic offline Electra truth-pack reports."""
+"""Generate deterministic offline Electra + HotelRunner truth-pack reports."""
 
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ QUESTIONS = [
     "sales by month for 2026",
     "top agencies in 2026",
     "share of direct vs agencies in 2025",
+    "compare electra vs hotelrunner for 2025",
+    "compare electra vs hotelrunner for 2026",
+    "where do electra and hotelrunner differ in 2025",
+    "where do electra and hotelrunner differ in 2026",
 ]
 
 
@@ -37,9 +41,11 @@ def _slug(i: int, question: str) -> str:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate deterministic Electra truth-pack reports.")
+    parser = argparse.ArgumentParser(description="Generate deterministic Electra + HotelRunner truth-pack reports.")
     parser.add_argument(
         "--outdir",
+        "--out",
+        dest="outdir",
         default="outputs/_truth_pack",
         help="Output directory inside repo (default: outputs/_truth_pack)",
     )
@@ -86,7 +92,7 @@ def main() -> int:
         )
         entries.append({"question": question, "md": md_path.name, "html": html_path.name})
 
-    index_lines = ["# Hotel Truth Pack v1", "", "Deterministic Electra mock report pack.", ""]
+    index_lines = ["# Hotel Truth Pack v1", "", "Deterministic Electra + HotelRunner mock report pack.", ""]
     for idx, entry in enumerate(entries, start=1):
         index_lines.append(f"## Q{idx}")
         index_lines.append(f"- question: {entry['question']}")

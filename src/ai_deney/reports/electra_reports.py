@@ -225,6 +225,11 @@ def answer_question(text: str, normalized_root: Path | None = None, output_forma
     """
 
     spec = parse_electra_query(text)
+    if spec.source == "reconcile":
+        from ai_deney.reports.reconcile_reports import answer_from_spec
+
+        return answer_from_spec(spec, normalized_root=normalized_root, output_format=output_format)
+
     ensure_normalized_data(spec.years, reports=[spec.report], normalized_root=normalized_root)
     registry = _build_registry(normalized_root=normalized_root)
     executor = registry.get(spec.registry_key)

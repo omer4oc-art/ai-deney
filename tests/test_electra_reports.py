@@ -166,3 +166,16 @@ def test_ask_electra_cli_writes_html_report() -> None:
     assert "<!doctype html>" in content.lower()
     assert "<table>" in content
     assert "WROTE:" in p.stdout
+
+
+def test_answer_question_supports_reconciliation_report() -> None:
+    tmp_root = _repo_tmp_dir("reconcile")
+    normalized_root = tmp_root / "normalized"
+    text = answer_question(
+        "compare electra vs hotelrunner for 2025",
+        normalized_root=normalized_root,
+    )
+    assert "# Electra vs HotelRunner Daily Reconciliation (2025)" in text
+    assert "| date | year | electra_gross | hr_gross | delta | status | reason_code |" in text
+    assert "TIMING" in text
+    assert "ROUNDING" in text
