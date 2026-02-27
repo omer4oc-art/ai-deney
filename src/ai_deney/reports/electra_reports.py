@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import os
 from html import escape
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from ai_deney.analytics.electra_queries import (
     get_top_agencies,
 )
 from ai_deney.connectors.electra_mock import ElectraMockConnector
+from ai_deney.connectors.electra_playwright import ElectraPlaywrightConnector
 from ai_deney.intent.electra_intent import parse_electra_query
 from ai_deney.parsing.electra_sales import TOTAL_AGENCY_ID, normalize_report_files
 from ai_deney.reports.registry import ReportRegistry
@@ -31,6 +33,39 @@ def _default_normalized_root() -> Path:
 
 def _default_raw_root() -> Path:
     return _repo_root() / "data" / "raw" / "electra_mock"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
+
+
+def _electra_connector_mode() -> str:
+    return os.environ.get("AI_DENEY_ELECTRA_CONNECTOR", "mock").strip().lower() or "mock"
+
+
+def _build_electra_connector(repo: Path, raw: Path):
+    mode = _electra_connector_mode()
+    if mode in {"mock", "fixtures"}:
+        return ElectraMockConnector(repo_root=repo, raw_root=raw)
+    if mode in {"portal_playwright", "playwright"}:
+        return ElectraPlaywrightConnector(
+            repo_root=repo,
+            raw_root=repo / "data" / "raw" / "electra_portal",
+            portal_base_url=os.environ.get("AI_DENEY_ELECTRA_PORTAL_URL", "http://127.0.0.1:8008"),
+            username=os.environ.get("AI_DENEY_ELECTRA_PORTAL_USERNAME", "demo"),
+            password=os.environ.get("AI_DENEY_ELECTRA_PORTAL_PASSWORD", "demo123"),
+            timeout_ms=_env_int("AI_DENEY_ELECTRA_PORTAL_TIMEOUT_MS", 15000),
+            max_retries=_env_int("AI_DENEY_ELECTRA_PORTAL_MAX_RETRIES", 2),
+            screenshot_root=repo / "outputs" / "_watcher_logs",
+        )
+    raise ValueError(
+        f"unsupported AI_DENEY_ELECTRA_CONNECTOR mode: {mode} "
+        "(expected one of: mock, portal_playwright)"
+    )
 
 
 def _electra_year_data_flags(year: int, normalized_root: Path) -> tuple[bool, bool]:
@@ -101,12 +136,19 @@ def ensure_normalized_data(
             if need_agency and not has_agency:
                 missing_agency_years.append(year)
 
-    conn = ElectraMockConnector(repo_root=repo, raw_root=raw)
+    conn = _build_electra_connector(repo=repo, raw=raw)
+    export_variant = os.environ.get("AI_DENEY_ELECTRA_EXPORT_VARIANT", "canonical")
     if missing_summary_years:
-        summary_paths = conn.fetch_report("sales_summary", {"years": missing_summary_years})
+        summary_paths = conn.fetch_report(
+            "sales_summary",
+            {"years": missing_summary_years, "export_variant": export_variant},
+        )
         normalize_report_files(summary_paths, report_type="sales_summary", output_root=normalized)
     if missing_agency_years:
-        agency_paths = conn.fetch_report("sales_by_agency", {"years": missing_agency_years})
+        agency_paths = conn.fetch_report(
+            "sales_by_agency",
+            {"years": missing_agency_years, "export_variant": export_variant},
+        )
         normalize_report_files(agency_paths, report_type="sales_by_agency", output_root=normalized)
 
 

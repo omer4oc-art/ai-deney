@@ -20,10 +20,10 @@ python3 scripts/generate_truth_pack.py --out outputs/_truth_pack --use-inbox 1
 Supported now:
 
 - CSV (`.csv`)
+- XLSX/XLSM (`.xlsx`, `.xlsm`) when adapter runtime has `openpyxl`
 
 Not supported by inbox ingest right now:
 
-- XLSX (`.xlsx`)
 - PDF (`.pdf`)
 
 ## Strict Filename Convention

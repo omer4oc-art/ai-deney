@@ -80,6 +80,8 @@ docs/*
 !docs/schema_electra_sales.md
 !docs/INBOX_WORKFLOW.md
 !docs/INBOX_WATCHER.md
+!docs/EXPORT_CONTRACT.md
+!docs/ELECTRA_TEST_PORTAL.md
 outputs/
 
 # inbox drop-folder payloads (never commit real exports)
