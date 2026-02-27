@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ai_deney.inbox_watcher</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd /Users/omer/ai-deney/week1 &amp;&amp; bash scripts/inbox_watch_once.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/omer/ai-deney/week1</string>
+
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/omer/ai-deney/week1/outputs/_watcher_logs/inbox_watcher.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/omer/ai-deney/week1/outputs/_watcher_logs/inbox_watcher.err.log</string>
+</dict>
+</plist>

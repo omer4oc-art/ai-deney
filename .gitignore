@@ -79,6 +79,7 @@ docs/*
 !docs/RELEASING.md
 !docs/schema_electra_sales.md
 !docs/INBOX_WORKFLOW.md
+!docs/INBOX_WATCHER.md
 outputs/
 
 # inbox drop-folder payloads (never commit real exports)
@@ -86,3 +87,7 @@ data/inbox/**
 
 # local runner
 actions-runner/
+
+# inbox watcher artifacts
+outputs/inbox_runs/**
+outputs/_watcher_logs/**
