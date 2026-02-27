@@ -246,7 +246,7 @@ def answer_from_spec(spec: QuerySpec, normalized_root: Path | None = None, outpu
         notes = (
             f"Monthly reconciliation by agency for years: {years_label}. "
             "Status is MATCH when abs(delta) <= 1.00. "
-            "Dim uses canonical mapping layer v1."
+            "Dim uses canonical mapping layer v2."
         )
     elif spec.analysis == "reconcile_anomalies_agency":
         reconcile_df = registry.get("reconcile.daily_by_agency")(spec.years)
@@ -259,7 +259,7 @@ def answer_from_spec(spec: QuerySpec, normalized_root: Path | None = None, outpu
         notes = (
             f"Deterministic anomaly scan by agency for years: {years_label}. "
             "Includes spike/drop (>20%), new agencies, and top mismatch contributors. "
-            "Dim uses canonical mapping layer v1."
+            "Dim uses canonical mapping layer v2."
         )
     else:
         reconcile_df = registry.get("reconcile.daily_by_agency")(spec.years)
@@ -274,7 +274,7 @@ def answer_from_spec(spec: QuerySpec, normalized_root: Path | None = None, outpu
         notes = (
             f"Daily reconciliation by agency for years: {years_label}. "
             "Status is MATCH when abs(delta) <= 1.00. "
-            "Dim uses canonical mapping layer v1."
+            "Dim uses canonical mapping layer v2."
         )
 
     reconcile_rows = _df_records(reconcile_df)

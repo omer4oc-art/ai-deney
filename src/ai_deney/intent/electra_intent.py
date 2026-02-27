@@ -24,6 +24,8 @@ _SUPPORTED_EXAMPLES = [
     "mapping health report 2025",
     "which agencies are unmapped in 2026",
     "agency drift electra vs hotelrunner 2025",
+    "mapping explain agency 2026",
+    "unknown rate improvement 2026",
 ]
 
 
@@ -82,11 +84,28 @@ def parse_electra_query(text: str) -> QuerySpec:
     is_mapping_health_channel = is_mapping_health and asks_channel
     is_mapping_unmapped_agency = ("unmapped" in lowered) and has_agency
     is_mapping_drift_agency = ("drift" in lowered) and has_agency and mentions_electra and mentions_hotelrunner
+    is_mapping_explain_agency = asks_mapping and ("explain" in lowered) and has_agency
+    is_mapping_unknown_rate_improvement = (
+        ("unknown" in lowered)
+        and ("rate" in lowered)
+        and ("improvement" in lowered)
+        and ("mapping" in lowered or "reconcile" in lowered or "electra" in lowered or "hotelrunner" in lowered)
+    )
 
     if is_mapping_health_channel:
         report = "sales_by_agency"
         group_by = None
         analysis = "mapping_health_channel"
+        source = "mapping"
+    elif is_mapping_explain_agency:
+        report = "sales_by_agency"
+        group_by = "agency"
+        analysis = "mapping_explain_agency"
+        source = "mapping"
+    elif is_mapping_unknown_rate_improvement:
+        report = "sales_by_agency"
+        group_by = "agency"
+        analysis = "mapping_unknown_rate_improvement"
         source = "mapping"
     elif is_mapping_unmapped_agency:
         report = "sales_by_agency"

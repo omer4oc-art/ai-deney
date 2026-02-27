@@ -23,6 +23,8 @@ AnalysisName = Literal[
     "mapping_health_channel",
     "mapping_unmapped_agency",
     "mapping_drift_agency",
+    "mapping_explain_agency",
+    "mapping_unknown_rate_improvement",
 ]
 SourceName = Literal["electra", "reconcile", "mapping"]
 
@@ -61,6 +63,10 @@ class QuerySpec:
         if self.source == "mapping":
             if self.analysis == "mapping_health_channel":
                 return "mapping.health_channel"
+            if self.analysis == "mapping_explain_agency":
+                return "mapping.explain_agency"
+            if self.analysis == "mapping_unknown_rate_improvement":
+                return "mapping.unknown_rate_improvement"
             return "mapping.health_agency"
         key = self.analysis or self.report
         return f"electra.{key}"

@@ -35,6 +35,10 @@ QUESTIONS = [
     "mapping health report 2026",
     "which agencies are unmapped in 2026",
     "agency drift electra vs hotelrunner 2025",
+    "mapping explain agency 2025",
+    "mapping explain agency 2026",
+    "mapping unknown rate improvement 2025",
+    "mapping unknown rate improvement 2026",
 ]
 
 

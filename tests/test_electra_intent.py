@@ -131,3 +131,19 @@ def test_parse_mapping_drift_pattern() -> None:
     assert spec.analysis == "mapping_drift_agency"
     assert spec.registry_key == "mapping.health_agency"
     assert spec.years == [2025]
+
+
+def test_parse_mapping_explain_pattern() -> None:
+    spec = parse_electra_query("mapping explain agency 2026")
+    assert spec.source == "mapping"
+    assert spec.analysis == "mapping_explain_agency"
+    assert spec.registry_key == "mapping.explain_agency"
+    assert spec.years == [2026]
+
+
+def test_parse_mapping_unknown_rate_improvement_pattern() -> None:
+    spec = parse_electra_query("mapping unknown rate improvement 2025")
+    assert spec.source == "mapping"
+    assert spec.analysis == "mapping_unknown_rate_improvement"
+    assert spec.registry_key == "mapping.unknown_rate_improvement"
+    assert spec.years == [2025]

@@ -28,6 +28,9 @@ _ANOMALY_TOP_N = 3
 _DIM_AGENCY = "agency"
 _DIM_CHANNEL = "channel"
 _VALID_DIMS = {_DIM_AGENCY, _DIM_CHANNEL}
+_DIM_VALUE_MODE_CANONICAL = "canonical"
+_DIM_VALUE_MODE_RAW = "raw"
+_VALID_DIM_VALUE_MODES = {_DIM_VALUE_MODE_CANONICAL, _DIM_VALUE_MODE_RAW}
 
 
 @dataclass
@@ -103,6 +106,13 @@ def _validate_dim(dim: str) -> str:
     return clean
 
 
+def _validate_dim_value_mode(mode: str) -> str:
+    clean = str(mode or "").strip().lower()
+    if clean not in _VALID_DIM_VALUE_MODES:
+        raise ValueError(f"unsupported dim_value_mode: {mode}; expected one of: {sorted(_VALID_DIM_VALUE_MODES)}")
+    return clean
+
+
 def _normalize_agency_id(raw: str) -> str:
     out = []
     for ch in str(raw or "").strip().upper():
@@ -116,33 +126,40 @@ def _normalize_agency_id(raw: str) -> str:
     return cleaned or "UNKNOWN"
 
 
-def _electra_dim_value(row: dict, dim: str) -> str | None:
+def _electra_dim_value(row: dict, dim: str, dim_value_mode: str = _DIM_VALUE_MODE_CANONICAL) -> str | None:
     agency_id = str(row.get("agency_id") or "").strip()
     if agency_id == TOTAL_AGENCY_ID:
         return None
     if dim == _DIM_AGENCY:
-        canon_agency_id = str(row.get("canon_agency_id") or "").strip()
-        canon_agency_name = str(row.get("canon_agency_name") or "").strip()
-        if canon_agency_id:
-            return canon_agency_id
-        if canon_agency_name:
-            return canon_agency_name
+        if dim_value_mode == _DIM_VALUE_MODE_CANONICAL:
+            canon_agency_id = str(row.get("canon_agency_id") or "").strip()
+            canon_agency_name = str(row.get("canon_agency_name") or "").strip()
+            if canon_agency_id:
+                return canon_agency_id
+            if canon_agency_name:
+                return canon_agency_name
         return agency_id or str(row.get("agency_name") or "").strip() or None
-    canon_channel = str(row.get("canon_channel") or "").strip()
-    if canon_channel:
-        return canon_channel
+    if dim_value_mode == _DIM_VALUE_MODE_CANONICAL:
+        canon_channel = str(row.get("canon_channel") or "").strip()
+        if canon_channel:
+            return canon_channel
     agency_name = str(row.get("agency_name") or "").strip()
     return agency_name or None
 
 
-def _hotelrunner_dim_value(row: dict, dim: str) -> str | None:
+def _hotelrunner_dim_value(row: dict, dim: str, dim_value_mode: str = _DIM_VALUE_MODE_CANONICAL) -> str | None:
     if dim == _DIM_AGENCY:
-        canon_agency_id = str(row.get("canon_agency_id") or "").strip()
-        canon_agency_name = str(row.get("canon_agency_name") or "").strip()
-        if canon_agency_id:
-            return canon_agency_id
-        if canon_agency_name:
-            return canon_agency_name
+        if dim_value_mode == _DIM_VALUE_MODE_CANONICAL:
+            canon_agency_id = str(row.get("canon_agency_id") or "").strip()
+            canon_agency_name = str(row.get("canon_agency_name") or "").strip()
+            if canon_agency_id:
+                return canon_agency_id
+            if canon_agency_name:
+                return canon_agency_name
+        if dim_value_mode == _DIM_VALUE_MODE_RAW:
+            channel = str(row.get("channel") or row.get("agency") or "").strip()
+            if channel:
+                return channel
         agency_id = str(row.get("agency_id") or "").strip()
         if agency_id:
             return agency_id
@@ -153,9 +170,10 @@ def _hotelrunner_dim_value(row: dict, dim: str) -> str | None:
         if channel:
             return _normalize_agency_id(channel)
         return None
-    canon_channel = str(row.get("canon_channel") or "").strip()
-    if canon_channel:
-        return canon_channel
+    if dim_value_mode == _DIM_VALUE_MODE_CANONICAL:
+        canon_channel = str(row.get("canon_channel") or "").strip()
+        if canon_channel:
+            return canon_channel
     channel = str(row.get("channel") or row.get("agency_name") or row.get("agency") or "").strip()
     if channel:
         return channel
@@ -164,7 +182,11 @@ def _hotelrunner_dim_value(row: dict, dim: str) -> str | None:
 
 
 def _read_electra_daily_by_dim(
-    years: list[int], normalized_root: Path, dim: str, mapping: MappingBundle
+    years: list[int],
+    normalized_root: Path,
+    dim: str,
+    mapping: MappingBundle | None,
+    dim_value_mode: str,
 ) -> dict[tuple[int, str, str], float]:
     _validate_electra_years_exist(years, normalized_root)
     out: dict[tuple[int, str, str], float] = {}
@@ -172,8 +194,13 @@ def _read_electra_daily_by_dim(
         path = normalized_root / f"electra_sales_{year}.csv"
         with path.open("r", encoding="utf-8", newline="") as f:
             for row in csv.DictReader(f):
-                enriched = enrich_row(row, source_system="electra", mapping=mapping)
-                dim_value = _electra_dim_value(enriched, dim=dim)
+                if dim_value_mode == _DIM_VALUE_MODE_CANONICAL:
+                    if mapping is None:
+                        raise ValueError("mapping is required for canonical dim value mode")
+                    enriched = enrich_row(row, source_system="electra", mapping=mapping)
+                else:
+                    enriched = dict(row)
+                dim_value = _electra_dim_value(enriched, dim=dim, dim_value_mode=dim_value_mode)
                 if not dim_value:
                     continue
                 date = str(enriched["date"]).strip()
@@ -183,7 +210,11 @@ def _read_electra_daily_by_dim(
 
 
 def _read_hotelrunner_daily_by_dim(
-    years: list[int], normalized_root: Path, dim: str, mapping: MappingBundle
+    years: list[int],
+    normalized_root: Path,
+    dim: str,
+    mapping: MappingBundle | None,
+    dim_value_mode: str,
 ) -> dict[tuple[int, str, str], float]:
     validate_hr_years_exist(years, normalized_root)
     out: dict[tuple[int, str, str], float] = {}
@@ -191,8 +222,13 @@ def _read_hotelrunner_daily_by_dim(
         path = normalized_root / f"hotelrunner_sales_{year}.csv"
         with path.open("r", encoding="utf-8", newline="") as f:
             for row in csv.DictReader(f):
-                enriched = enrich_row(row, source_system="hotelrunner", mapping=mapping)
-                dim_value = _hotelrunner_dim_value(enriched, dim=dim)
+                if dim_value_mode == _DIM_VALUE_MODE_CANONICAL:
+                    if mapping is None:
+                        raise ValueError("mapping is required for canonical dim value mode")
+                    enriched = enrich_row(row, source_system="hotelrunner", mapping=mapping)
+                else:
+                    enriched = dict(row)
+                dim_value = _hotelrunner_dim_value(enriched, dim=dim, dim_value_mode=dim_value_mode)
                 if not dim_value:
                     continue
                 date = str(enriched["date"]).strip()
@@ -409,6 +445,8 @@ def reconcile_by_dim_daily(
     normalized_root_hr: Path,
     mapping_agencies_path: Path | None = None,
     mapping_channels_path: Path | None = None,
+    mapping_rules_path: Path | None = None,
+    dim_value_mode: str = _DIM_VALUE_MODE_CANONICAL,
 ):
     """
     Reconcile daily gross sales by a common dimension (agency/channel).
@@ -424,13 +462,29 @@ def reconcile_by_dim_daily(
     - reason_code
     """
     dim_clean = _validate_dim(dim)
+    mode_clean = _validate_dim_value_mode(dim_value_mode)
     years_i = sorted(set(int(y) for y in years))
-    mapping = load_mapping_bundle(
-        mapping_agencies_path=mapping_agencies_path,
-        mapping_channels_path=mapping_channels_path,
+    mapping: MappingBundle | None = None
+    if mode_clean == _DIM_VALUE_MODE_CANONICAL:
+        mapping = load_mapping_bundle(
+            mapping_agencies_path=mapping_agencies_path,
+            mapping_channels_path=mapping_channels_path,
+            mapping_rules_path=mapping_rules_path,
+        )
+    electra_by_dim = _read_electra_daily_by_dim(
+        years_i,
+        normalized_root_electra,
+        dim=dim_clean,
+        mapping=mapping,
+        dim_value_mode=mode_clean,
     )
-    electra_by_dim = _read_electra_daily_by_dim(years_i, normalized_root_electra, dim=dim_clean, mapping=mapping)
-    hr_by_dim = _read_hotelrunner_daily_by_dim(years_i, normalized_root_hr, dim=dim_clean, mapping=mapping)
+    hr_by_dim = _read_hotelrunner_daily_by_dim(
+        years_i,
+        normalized_root_hr,
+        dim=dim_clean,
+        mapping=mapping,
+        dim_value_mode=mode_clean,
+    )
     keys = sorted(
         set(electra_by_dim.keys()) | set(hr_by_dim.keys()),
         key=lambda x: (x[0], x[1], x[2]),
@@ -500,6 +554,8 @@ def reconcile_by_dim_monthly(
     normalized_root_hr: Path,
     mapping_agencies_path: Path | None = None,
     mapping_channels_path: Path | None = None,
+    mapping_rules_path: Path | None = None,
+    dim_value_mode: str = _DIM_VALUE_MODE_CANONICAL,
 ):
     """
     Reconcile monthly gross sales by a common dimension (agency/channel).
@@ -523,6 +579,8 @@ def reconcile_by_dim_monthly(
             normalized_root_hr=normalized_root_hr,
             mapping_agencies_path=mapping_agencies_path,
             mapping_channels_path=mapping_channels_path,
+            mapping_rules_path=mapping_rules_path,
+            dim_value_mode=dim_value_mode,
         )
     )
     by_month: dict[tuple[int, str, str], dict] = {}

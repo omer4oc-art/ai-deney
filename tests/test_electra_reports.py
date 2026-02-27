@@ -290,3 +290,29 @@ def test_answer_question_supports_mapping_unmapped_and_drift_queries() -> None:
         normalized_root=normalized_root,
     )
     assert "# Agency Drift Electra vs HotelRunner (2025)" in drift
+
+
+def test_answer_question_supports_mapping_explain_report() -> None:
+    tmp_root = _repo_tmp_dir("mapping_explain")
+    normalized_root = tmp_root / "normalized"
+    text = answer_question(
+        "mapping explain agency 2026",
+        normalized_root=normalized_root,
+    )
+    assert "# Mapping Explainability by Agency (2026)" in text
+    assert "## Mapped Decisions Sample" in text
+    assert "## Unmapped Suggestions" in text
+    assert "mapped_by" in text
+    assert "csv_match:id" in text
+
+
+def test_answer_question_supports_mapping_unknown_rate_improvement_report() -> None:
+    tmp_root = _repo_tmp_dir("mapping_unknown_rate")
+    normalized_root = tmp_root / "normalized"
+    text = answer_question(
+        "mapping unknown rate improvement 2025",
+        normalized_root=normalized_root,
+    )
+    assert "# Unknown Rate Improvement by Mapping (2025)" in text
+    assert "## Unknown Rate Improvement" in text
+    assert "| year | baseline_unknown_rate | mapped_unknown_rate | improvement_pct |" in text

@@ -35,6 +35,10 @@ def test_generate_truth_pack_script_creates_index_and_bundle() -> None:
     assert "mapping health report 2025" in index_text
     assert "which agencies are unmapped in 2026" in index_text
     assert "agency drift electra vs hotelrunner 2025" in index_text
+    assert "mapping explain agency 2025" in index_text
+    assert "mapping explain agency 2026" in index_text
+    assert "mapping unknown rate improvement 2025" in index_text
+    assert "mapping unknown rate improvement 2026" in index_text
 
     bundle_text = bundle_path.read_text(encoding="utf-8")
     assert "===== FILE: index.md =====" in bundle_text
