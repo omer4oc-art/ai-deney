@@ -78,3 +78,6 @@ docs/*
 !docs/DEBUGGING.md
 !docs/RELEASING.md
 outputs/
+
+# local runner
+actions-runner/

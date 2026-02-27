@@ -40,6 +40,12 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      - name: Python Diagnostics
+        run: |
+          python --version
+          which python
+          python -m pip --version
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
@@ -61,6 +67,41 @@ jobs:
             find tests/_tmp_tasks -type f -name "*.md" 2>/dev/null || true
             find tests/eval_pack/tasks -maxdepth 1 -type f -name "*.md" 2>/dev/null || true
           } > outputs/ci_context/taskfiles.txt
+
+      - name: List CI Artifact Candidates
+        if: failure()
+        run: |
+          python - <<'PY'
+          import glob
+          import os
+          patterns = [
+              ".pytest_cache/**",
+              "outputs/ci_context/taskfiles.txt",
+              "outputs/_smoke_*/**",
+              "outputs/**/index.md",
+              "outputs/**/gate_report.json",
+              "outputs/**/transcript.jsonl",
+              "outputs/**/bundle.txt",
+              "outputs/**/pytest.log",
+              "tests/_tmp_tasks/**/*.md",
+              "tests/eval_pack/tasks/*.md",
+          ]
+          files = set()
+          for p in patterns:
+              for path in glob.glob(p, recursive=True):
+                  if os.path.isfile(path):
+                      files.add(path)
+          ordered = sorted(files)
+          print(f"artifact_candidate_files={len(ordered)}")
+          for path in ordered[:200]:
+              try:
+                  size = os.path.getsize(path)
+              except OSError:
+                  size = -1
+              print(f"{size:10d} {path}")
+          if len(ordered) > 200:
+              print("artifact_candidate_files_truncated=1")
+          PY
 
       - name: Upload CI Debug Artifacts
         if: failure()
@@ -93,6 +134,12 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      - name: Python Diagnostics
+        run: |
+          python --version
+          which python
+          python -m pip --version
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
@@ -114,6 +161,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+
+      - name: Python Diagnostics
+        run: |
+          python --version
+          which python
+          python -m pip --version
 
       - name: Install Dependencies
         run: |

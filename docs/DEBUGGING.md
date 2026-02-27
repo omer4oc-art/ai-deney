@@ -4,7 +4,9 @@
 - Open GitHub Actions.
 - Open the failed run.
 - Download artifact: `ci-debug-artifacts`.
-- For nightly soak runs, open the `Nightly` workflow run and download `nightly-soak-artifacts`.
+- For nightly runs, open the `Nightly` workflow run and download:
+  - `nightly-report` (stub soak summary + logs)
+  - `nightly-real-report` (real lane index/bundle/transcript/gate report)
 
 ## High-Value Files
 - `index.md`: per-task status and errors.

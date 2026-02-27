@@ -20,15 +20,24 @@ done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-if [[ -x ".venv/bin/pytest" ]]; then
-  PYTEST_CMD=(.venv/bin/pytest)
-elif command -v pytest >/dev/null 2>&1; then
-  PYTEST_CMD=(pytest)
+if [[ -f "$ROOT/scripts/_py.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/_py.sh"
 else
-  echo "pytest not found. Install pytest or use repo .venv." >&2
+  if [[ -x "$ROOT/.venv/bin/python3" ]]; then
+    PY="$ROOT/.venv/bin/python3"
+  else
+    PY="python3"
+  fi
+  export PY
+fi
+
+if ! "$PY" -c "import pytest" >/dev/null 2>&1; then
+  echo "pytest not found for interpreter: $PY" >&2
   exit 2
 fi
 
+PYTEST_CMD=("$PY" -m pytest)
 ARGS=(-q tests/eval_pack)
 if [[ "$VERBOSE" == "1" ]]; then
   ARGS=(-q -vv tests/eval_pack)

@@ -11,12 +11,20 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+if [[ -f "$ROOT/scripts/_py.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/_py.sh"
+else
+  if [[ -x "$ROOT/.venv/bin/python3" ]]; then
+    PY="$ROOT/.venv/bin/python3"
+  else
+    PY="python3"
+  fi
+  export PY
+fi
 if [[ -n "${RELEASE_PYTHON:-}" ]]; then
   PY="$RELEASE_PYTHON"
-elif [[ -x "$ROOT/.venv/bin/python3" ]]; then
-  PY="$ROOT/.venv/bin/python3"
-else
-  PY="python3"
+  export PY
 fi
 
 if [[ ! -d "$ART_DIR" ]]; then

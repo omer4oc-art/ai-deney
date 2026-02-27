@@ -998,15 +998,19 @@ def _maybe_run_pytest(project_root: Path) -> tuple[bool, str]:
 
     env = dict(**__import__("os").environ)
     src_dir = project_root / "src"
+    py_paths = [str(project_root.resolve())]
     if src_dir.exists():
-        env["PYTHONPATH"] = str(src_dir) + (":" + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
+        py_paths.append(str(src_dir.resolve()))
+    if env.get("PYTHONPATH"):
+        py_paths.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = ":".join(py_paths)
 
     try:
         venv_pytest = project_root / ".venv" / "bin" / "pytest"
         if venv_pytest.exists() and os.access(str(venv_pytest), os.X_OK):
-            cmd = [str(venv_pytest), "-q"]
+            cmd = [str(venv_pytest), "-q", "tests"]
         else:
-            cmd = ["pytest", "-q"]
+            cmd = ["pytest", "-q", "tests"]
         extra = env.get("AI_DENEY_PYTEST_ARGS", "").strip()
         if extra:
             try:

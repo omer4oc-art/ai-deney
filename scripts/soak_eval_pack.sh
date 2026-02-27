@@ -27,6 +27,18 @@ done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+if [[ -f "$ROOT/scripts/_py.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/_py.sh"
+else
+  if [[ -x "$ROOT/.venv/bin/python3" ]]; then
+    PY="$ROOT/.venv/bin/python3"
+  else
+    PY="python3"
+  fi
+  export PY
+fi
+
 TS="$(date +%Y%m%d-%H%M%S)"
 SOAK_DIR="$OUTBASE/$TS"
 RUNS_DIR="$SOAK_DIR/runs"
@@ -109,7 +121,7 @@ while should_continue; do
     if [[ -n "$saved_line" ]]; then
       FAILURE_ARTIFACTS="${saved_line#artifacts_saved_to=}"
     else
-      latest_fail="$(ls -1dt outputs/eval_failures/* 2>/dev/null | head -n 1 || true)"
+      latest_fail="$(find outputs/eval_failures -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)"
       if [[ -n "$latest_fail" ]]; then
         FAILURE_ARTIFACTS="$latest_fail"
       fi

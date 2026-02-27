@@ -27,6 +27,12 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      - name: Python Diagnostics
+        run: |
+          python --version
+          which python
+          python -m pip --version
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
@@ -43,13 +49,48 @@ jobs:
           latest="$(ls -1dt outputs/soak_runs/* 2>/dev/null | head -n 1 || true)"
           echo "path=$latest" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Nightly Soak Artifacts
+      - name: Build Nightly Stub Report
+        if: always() && steps.latest.outputs.path != ''
+        run: |
+          python3 scripts/report_nightly.py \
+            --soak-dir "${{ steps.latest.outputs.path }}" \
+            --out outputs/nightly_report.txt
+
+      - name: List Nightly Stub Artifact Candidates
+        if: always() && steps.latest.outputs.path != ''
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          latest = Path(r"${{ steps.latest.outputs.path }}")
+          files = []
+          for p in [
+              Path("outputs/nightly_report.txt"),
+              latest / "soak_summary.jsonl",
+          ]:
+              if p.is_file():
+                  files.append(p)
+          runs = latest / "runs"
+          if runs.is_dir():
+              files.extend(sorted(runs.glob("*/pytest.log")))
+              files.extend(sorted(runs.glob("*/gate_report.json")))
+          files = sorted({str(p) for p in files})
+          print(f"artifact_candidate_files={len(files)}")
+          for s in files[:200]:
+              size = os.path.getsize(s)
+              print(f"{size:10d} {s}")
+          if len(files) > 200:
+              print("artifact_candidate_files_truncated=1")
+          PY
+
+      - name: Upload Nightly Report Artifacts
         if: always() && steps.latest.outputs.path != ''
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-soak-artifacts
+          name: nightly-report
           if-no-files-found: ignore
           path: |
+            outputs/nightly_report.txt
             ${{ steps.latest.outputs.path }}/soak_summary.jsonl
             ${{ steps.latest.outputs.path }}/runs/*/pytest.log
             ${{ steps.latest.outputs.path }}/runs/*/gate_report.json
@@ -67,11 +108,88 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      - name: Python Diagnostics
+        run: |
+          python --version
+          which python
+          python -m pip --version
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           python -m pip install -U pytest
 
-      - name: Run Real Lane
-        run: python -m pytest -q tests/eval_pack_real
+      - name: Run Real Lane Tasks
+        run: |
+          rm -rf outputs/nightly_real
+          mkdir -p tests/_tmp_tasks/nightly_real
+          out="tests/_tmp_tasks/nightly_real/tasks.md"
+          : > "$out"
+          while IFS= read -r f; do
+            cat "$f" >> "$out"
+            printf '\n\n' >> "$out"
+          done < <(find tests/eval_pack_real/tasks -maxdepth 1 -type f -name '*.md' | sort)
+          if [[ ! -s "$out" ]]; then
+            echo "no real tasks found under tests/eval_pack_real/tasks" >&2
+            exit 1
+          fi
+          python batch_agent.py \
+            --chat \
+            --tasks-format blocks \
+            --repair-retries 1 \
+            --bundle \
+            --record-transcript \
+            --outdir outputs/nightly_real \
+            "$out"
+
+      - name: Find Latest Soak Dir (optional)
+        id: latest_soak
+        if: always()
+        run: |
+          latest="$(ls -1dt outputs/soak_runs/* 2>/dev/null | head -n 1 || true)"
+          if [ -z "$latest" ]; then
+            latest="outputs/soak_runs/_none"
+            mkdir -p "$latest"
+          fi
+          echo "path=$latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build Nightly Real Report
+        if: always()
+        run: |
+          python3 scripts/report_nightly.py \
+            --soak-dir "${{ steps.latest_soak.outputs.path }}" \
+            --real-outdir outputs/nightly_real \
+            --out outputs/nightly_real_report.txt
+
+      - name: List Nightly Real Artifact Candidates
+        if: always()
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          files = [
+              Path("outputs/nightly_real_report.txt"),
+              Path("outputs/nightly_real/index.md"),
+              Path("outputs/nightly_real/bundle.txt"),
+              Path("outputs/nightly_real/transcript.jsonl"),
+              Path("outputs/nightly_real/gate_report.json"),
+          ]
+          existing = [str(p) for p in files if p.is_file()]
+          print(f"artifact_candidate_files={len(existing)}")
+          for s in sorted(existing)[:200]:
+              print(f"{os.path.getsize(s):10d} {s}")
+          PY
+
+      - name: Upload Nightly Real Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-real-report
+          if-no-files-found: ignore
+          path: |
+            outputs/nightly_real_report.txt
+            outputs/nightly_real/index.md
+            outputs/nightly_real/bundle.txt
+            outputs/nightly_real/transcript.jsonl
+            outputs/nightly_real/gate_report.json
