@@ -23,6 +23,8 @@ QUESTIONS = [
     "compare electra vs hotelrunner for 2026",
     "where do electra and hotelrunner differ in 2025",
     "where do electra and hotelrunner differ in 2026",
+    "electra vs hotelrunner monthly reconciliation for 2025",
+    "electra vs hotelrunner monthly reconciliation for 2026",
 ]
 
 

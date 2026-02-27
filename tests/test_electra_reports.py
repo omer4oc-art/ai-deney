@@ -181,6 +181,10 @@ def test_answer_question_supports_reconciliation_report() -> None:
     assert "- top_reason_codes: TIMING=2, UNKNOWN=1" in text
     assert "- total_mismatch_amount: 107.00" in text
     assert "- year_rollups: 2025: MATCH=27, MISMATCH=3, ABS_MISMATCH=107.00" in text
+    assert "## How to read this" in text
+    assert "- ROUNDING: minor rounding differences (<= $1)" in text
+    assert "## Top mismatch days" in text
+    assert "| date | delta | reason_code |" in text
     assert "| date | year | electra_gross | hr_gross | delta | status | reason_code |" in text
     assert "TIMING" in text
     assert "ROUNDING" in text
@@ -200,3 +204,17 @@ def test_answer_question_supports_reconciliation_report_html_summary() -> None:
     assert "top_reason_codes: TIMING=2, UNKNOWN=1" in text
     assert "total_mismatch_amount: 106.00" in text
     assert "year_rollups: 2026: MATCH=27, MISMATCH=3, ABS_MISMATCH=106.00" in text
+    assert "<h2>How to read this</h2>" in text
+    assert "<h2>Top mismatch days</h2>" in text
+
+
+def test_answer_question_supports_monthly_reconciliation_report() -> None:
+    tmp_root = _repo_tmp_dir("reconcile_monthly")
+    normalized_root = tmp_root / "normalized"
+    text = answer_question(
+        "electra vs hotelrunner monthly reconciliation for 2025",
+        normalized_root=normalized_root,
+    )
+    assert "# Electra vs HotelRunner Monthly Reconciliation (2025)" in text
+    assert "| year | month | electra_gross | hr_gross | delta | status |" in text
+    assert "Data freshness / source: Source: Electra + HotelRunner mock fixtures; Generated: deterministic run." in text

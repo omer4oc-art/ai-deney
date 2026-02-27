@@ -8,7 +8,7 @@ from ai_deney.connectors.electra_mock import ElectraMockConnector
 from ai_deney.connectors.hotelrunner_mock import HotelRunnerMockConnector
 from ai_deney.parsing.electra_sales import normalize_report_files as normalize_electra_report_files
 from ai_deney.parsing.hotelrunner_sales import normalize_report_files as normalize_hotelrunner_report_files
-from ai_deney.reconcile.electra_vs_hotelrunner import compute_year_rollups, reconcile_daily
+from ai_deney.reconcile.electra_vs_hotelrunner import compute_year_rollups, reconcile_daily, reconcile_monthly
 
 
 def _normalize_sources(tmp_path: Path, years: list[int]) -> Path:
@@ -144,6 +144,95 @@ def _write_custom_reconcile_fixture(normalized_root: Path) -> None:
     )
 
 
+def _write_monthly_reconcile_fixture(normalized_root: Path) -> None:
+    electra_rows = [
+        {
+            "date": "2040-01-03",
+            "year": 2040,
+            "agency_id": "TOTAL",
+            "agency_name": "Overall Total",
+            "gross_sales": "100.00",
+            "net_sales": "90.00",
+            "currency": "USD",
+        },
+        {
+            "date": "2040-01-17",
+            "year": 2040,
+            "agency_id": "TOTAL",
+            "agency_name": "Overall Total",
+            "gross_sales": "120.00",
+            "net_sales": "108.00",
+            "currency": "USD",
+        },
+        {
+            "date": "2040-02-05",
+            "year": 2040,
+            "agency_id": "TOTAL",
+            "agency_name": "Overall Total",
+            "gross_sales": "80.00",
+            "net_sales": "72.00",
+            "currency": "USD",
+        },
+        {
+            "date": "2040-02-20",
+            "year": 2040,
+            "agency_id": "TOTAL",
+            "agency_name": "Overall Total",
+            "gross_sales": "20.00",
+            "net_sales": "18.00",
+            "currency": "USD",
+        },
+    ]
+    hotelrunner_rows = [
+        {
+            "date": "2040-01-03",
+            "year": 2040,
+            "booking_id": "B-100",
+            "channel": "DIRECT",
+            "gross_sales": "90.00",
+            "net_sales": "81.00",
+            "currency": "USD",
+        },
+        {
+            "date": "2040-01-17",
+            "year": 2040,
+            "booking_id": "B-101",
+            "channel": "DIRECT",
+            "gross_sales": "120.00",
+            "net_sales": "108.00",
+            "currency": "USD",
+        },
+        {
+            "date": "2040-02-05",
+            "year": 2040,
+            "booking_id": "B-102",
+            "channel": "DIRECT",
+            "gross_sales": "79.60",
+            "net_sales": "72.00",
+            "currency": "USD",
+        },
+        {
+            "date": "2040-02-20",
+            "year": 2040,
+            "booking_id": "B-103",
+            "channel": "DIRECT",
+            "gross_sales": "20.00",
+            "net_sales": "18.00",
+            "currency": "USD",
+        },
+    ]
+    _write_csv(
+        normalized_root / "electra_sales_2040.csv",
+        ["date", "year", "agency_id", "agency_name", "gross_sales", "net_sales", "currency"],
+        electra_rows,
+    )
+    _write_csv(
+        normalized_root / "hotelrunner_sales_2040.csv",
+        ["date", "year", "booking_id", "channel", "gross_sales", "net_sales", "currency"],
+        hotelrunner_rows,
+    )
+
+
 def test_reconcile_daily_flags_rounding_timing_and_unknown(tmp_path: Path) -> None:
     normalized_root = _normalize_sources(tmp_path, [2025, 2026])
     df = reconcile_daily([2025, 2026], normalized_root, normalized_root)
@@ -210,3 +299,37 @@ def test_reconcile_daily_requires_year_files(tmp_path: Path) -> None:
     normalized_root.mkdir(parents=True, exist_ok=True)
     with pytest.raises(ValueError, match="normalized data missing for years"):
         reconcile_daily([2025], normalized_root, normalized_root)
+
+
+def test_reconcile_monthly_aggregates_and_sets_status(tmp_path: Path) -> None:
+    normalized_root = tmp_path / "normalized"
+    _write_monthly_reconcile_fixture(normalized_root)
+
+    df = reconcile_monthly([2040], normalized_root, normalized_root)
+    rows = df.to_dict("records")
+
+    assert rows == [
+        {
+            "year": 2040,
+            "month": "2040-01",
+            "electra_gross": 220.0,
+            "hr_gross": 210.0,
+            "delta": 10.0,
+            "status": "MISMATCH",
+        },
+        {
+            "year": 2040,
+            "month": "2040-02",
+            "electra_gross": 100.0,
+            "hr_gross": 99.6,
+            "delta": 0.4,
+            "status": "MATCH",
+        },
+    ]
+
+
+def test_reconcile_monthly_requires_year_files(tmp_path: Path) -> None:
+    normalized_root = tmp_path / "normalized"
+    normalized_root.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(ValueError, match="normalized data missing for years"):
+        reconcile_monthly([2025], normalized_root, normalized_root)

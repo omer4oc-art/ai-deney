@@ -110,6 +110,10 @@ def _is_fee_like(delta: float, electra_gross: float, hr_gross: float) -> bool:
     return False
 
 
+def _status_from_delta(delta: float) -> str:
+    return "MATCH" if abs(delta) <= _ROUNDING_TOLERANCE else "MISMATCH"
+
+
 def _df_rows(df_or_rows) -> list[dict]:
     if isinstance(df_or_rows, list):
         return [dict(r) for r in df_or_rows]
@@ -179,12 +183,8 @@ def reconcile_daily(years: list[int], normalized_root_electra: Path, normalized_
         electra_gross = round(float(electra_by_day.get((year, date), 0.0)), 2)
         hr_gross = round(float(hr_by_day.get((year, date), 0.0)), 2)
         delta = round(electra_gross - hr_gross, 2)
-        if _is_rounding(delta):
-            status = "MATCH"
-            reason = "ROUNDING"
-        else:
-            status = "MISMATCH"
-            reason = "UNKNOWN"
+        status = _status_from_delta(delta)
+        reason = "ROUNDING" if status == "MATCH" else "UNKNOWN"
         rows.append(
             {
                 "date": date,
@@ -233,4 +233,56 @@ def reconcile_daily(years: list[int], normalized_root_electra: Path, normalized_
                 row["reason_code"] = "FEE"
 
     rows.sort(key=lambda r: (r["year"], r["date"]))
+    return _to_dataframe(rows, year_rollups=compute_year_rollups(rows))
+
+
+def reconcile_monthly(years: list[int], normalized_root_electra: Path, normalized_root_hr: Path):
+    """
+    Reconcile monthly gross sales between Electra and HotelRunner.
+
+    Output columns:
+    - year
+    - month (YYYY-MM)
+    - electra_gross
+    - hr_gross
+    - delta (electra_gross - hr_gross)
+    - status: MATCH | MISMATCH
+    """
+    years_i = sorted(set(int(y) for y in years))
+    electra_by_day = _read_electra_daily_totals(years_i, normalized_root_electra)
+    hr_by_day = _read_hotelrunner_daily_totals(years_i, normalized_root_hr)
+    day_keys = sorted(set(electra_by_day.keys()) | set(hr_by_day.keys()), key=lambda x: (x[0], x[1]))
+
+    by_month: dict[tuple[int, str], dict] = {}
+    for year, date in day_keys:
+        month = str(date)[:7]
+        bucket = by_month.setdefault(
+            (year, month),
+            {
+                "year": year,
+                "month": month,
+                "electra_gross": 0.0,
+                "hr_gross": 0.0,
+            },
+        )
+        bucket["electra_gross"] += float(electra_by_day.get((year, date), 0.0))
+        bucket["hr_gross"] += float(hr_by_day.get((year, date), 0.0))
+
+    rows: list[dict] = []
+    for year, month in sorted(by_month.keys(), key=lambda x: (x[0], x[1])):
+        bucket = by_month[(year, month)]
+        electra_gross = round(float(bucket["electra_gross"]), 2)
+        hr_gross = round(float(bucket["hr_gross"]), 2)
+        delta = round(electra_gross - hr_gross, 2)
+        rows.append(
+            {
+                "year": year,
+                "month": month,
+                "electra_gross": electra_gross,
+                "hr_gross": hr_gross,
+                "delta": delta,
+                "status": _status_from_delta(delta),
+            }
+        )
+
     return _to_dataframe(rows, year_rollups=compute_year_rollups(rows))

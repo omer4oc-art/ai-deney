@@ -16,6 +16,8 @@ _SUPPORTED_EXAMPLES = [
     "share of direct vs agencies in 2025",
     "compare electra vs hotelrunner for 2025",
     "where do electra and hotelrunner differ in 2026",
+    "electra vs hotelrunner monthly reconciliation for 2025",
+    "monthly reconciliation 2026 electra hotelrunner",
 ]
 
 
@@ -57,10 +59,18 @@ def parse_electra_query(text: str) -> QuerySpec:
     is_direct_share = ("share" in lowered) and ("direct" in lowered) and has_agency
     mentions_electra = "electra" in lowered
     mentions_hotelrunner = ("hotelrunner" in lowered) or ("hotel runner" in lowered)
-    asks_reconcile = ("differ" in lowered) or ("difference" in lowered) or compare
+    asks_reconcile = ("differ" in lowered) or ("difference" in lowered) or compare or ("reconcil" in lowered)
     is_reconciliation = mentions_electra and mentions_hotelrunner and asks_reconcile
+    is_monthly_reconciliation = is_reconciliation and (
+        ("monthly" in lowered) or ("by month" in lowered)
+    )
 
-    if is_reconciliation:
+    if is_monthly_reconciliation:
+        report = "sales_summary"
+        group_by = "month"
+        analysis = "reconcile_monthly"
+        source = "reconcile"
+    elif is_reconciliation:
         report = "sales_summary"
         group_by = None
         analysis = "reconcile_daily"

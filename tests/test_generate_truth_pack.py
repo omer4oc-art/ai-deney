@@ -27,6 +27,8 @@ def test_generate_truth_pack_script_creates_index_and_bundle() -> None:
     assert ".md" in index_text
     assert ".html" in index_text
     assert "compare electra vs hotelrunner for 2025" in index_text
+    assert "electra vs hotelrunner monthly reconciliation for 2025" in index_text
+    assert "electra vs hotelrunner monthly reconciliation for 2026" in index_text
 
     bundle_text = bundle_path.read_text(encoding="utf-8")
     assert "===== FILE: index.md =====" in bundle_text

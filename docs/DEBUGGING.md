@@ -54,6 +54,15 @@ bash scripts/dev_check.sh
 bash scripts/dev_run_all.sh
 ```
 
+## Daily One-Command Workflow
+Use this to run the full local check pack in one command.
+
+```bash
+cd /Users/omer/ai-deney/week1
+source .venv/bin/activate
+bash scripts/dev_run_all.sh
+```
+
 `scripts/dev_check.sh` fails fast on wrong directory or wrong venv and prints the recovery command.
 
 `scripts/dev_run_all.sh` executes:

@@ -68,3 +68,17 @@ def test_parse_reconciliation_patterns() -> None:
     assert spec2.analysis == "reconcile_daily"
     assert spec2.registry_key == "reconcile.daily"
     assert spec2.years == [2026]
+
+
+def test_parse_reconciliation_monthly_patterns() -> None:
+    spec = parse_electra_query("electra vs hotelrunner monthly reconciliation for 2025")
+    assert spec.source == "reconcile"
+    assert spec.analysis == "reconcile_monthly"
+    assert spec.registry_key == "reconcile.monthly"
+    assert spec.years == [2025]
+
+    spec2 = parse_electra_query("monthly reconciliation 2026 electra hotelrunner")
+    assert spec2.source == "reconcile"
+    assert spec2.analysis == "reconcile_monthly"
+    assert spec2.registry_key == "reconcile.monthly"
+    assert spec2.years == [2026]

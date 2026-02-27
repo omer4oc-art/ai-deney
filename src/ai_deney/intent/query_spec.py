@@ -15,6 +15,7 @@ AnalysisName = Literal[
     "top_agencies",
     "direct_share",
     "reconcile_daily",
+    "reconcile_monthly",
 ]
 SourceName = Literal["electra", "reconcile"]
 
@@ -41,6 +42,8 @@ class QuerySpec:
     @property
     def registry_key(self) -> str:
         if self.source == "reconcile":
+            if self.analysis == "reconcile_monthly":
+                return "reconcile.monthly"
             return "reconcile.daily"
         key = self.analysis or self.report
         return f"electra.{key}"

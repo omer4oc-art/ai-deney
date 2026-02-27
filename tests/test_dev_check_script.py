@@ -26,6 +26,16 @@ def _assert_expected_layout(repo_root: Path) -> None:
         pytest.skip("expected .venv/bin/python3 to exist")
 
 
+def test_dev_scripts_exist_and_are_executable() -> None:
+    repo_root = _repo_root()
+    dev_check = repo_root / "scripts" / "dev_check.sh"
+    dev_run_all = repo_root / "scripts" / "dev_run_all.sh"
+    assert dev_check.exists()
+    assert dev_run_all.exists()
+    assert os.access(dev_check, os.X_OK)
+    assert os.access(dev_run_all, os.X_OK)
+
+
 def test_dev_check_passes_from_repo_root() -> None:
     repo_root = _repo_root()
     _assert_expected_layout(repo_root)

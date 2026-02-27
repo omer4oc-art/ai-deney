@@ -12,10 +12,16 @@ from ai_deney.intent.electra_intent import parse_electra_query
 from ai_deney.intent.query_spec import QuerySpec
 from ai_deney.parsing.electra_sales import normalize_report_files as normalize_electra_report_files
 from ai_deney.parsing.hotelrunner_sales import normalize_report_files as normalize_hotelrunner_report_files
-from ai_deney.reconcile.electra_vs_hotelrunner import compute_year_rollups, reconcile_daily
+from ai_deney.reconcile.electra_vs_hotelrunner import compute_year_rollups, reconcile_daily, reconcile_monthly
 from ai_deney.reports.registry import ReportRegistry
 
 _DETERMINISTIC_SOURCE_FOOTER = "Source: Electra + HotelRunner mock fixtures; Generated: deterministic run."
+_HOW_TO_READ_ITEMS = [
+    ("ROUNDING", "minor rounding differences (<= $1)"),
+    ("TIMING", "same money posted on adjacent days"),
+    ("FEE", "delta consistent with ~3% processing fee"),
+    ("UNKNOWN", "needs review; check refunds, manual adjustments, or missing postings"),
+]
 
 
 def _repo_root() -> Path:
@@ -79,6 +85,15 @@ def run_reconcile_daily(years: list[int], normalized_root: Path | None = None):
     )
 
 
+def run_reconcile_monthly(years: list[int], normalized_root: Path | None = None):
+    normalized = (normalized_root or _default_normalized_root()).resolve()
+    return reconcile_monthly(
+        years,
+        normalized_root_electra=normalized,
+        normalized_root_hr=normalized,
+    )
+
+
 def _format_value(value) -> str:
     if isinstance(value, float):
         return f"{value:.2f}"
@@ -93,6 +108,8 @@ def _sorted_rows(rows: list[dict], sort_by: str | list[str] | None = None, desce
 
 
 def _format_top_reasons(rows: list[dict], limit: int = 3) -> str:
+    if not rows or "reason_code" not in rows[0]:
+        return "n/a"
     mismatches = [r for r in rows if str(r.get("status")) == "MISMATCH"]
     if not mismatches:
         return "none"
@@ -126,6 +143,36 @@ def _summary_values(rows: list[dict]) -> dict:
     }
 
 
+def _should_render_top_mismatch_days(rows: list[dict]) -> bool:
+    if not rows:
+        return False
+    cols = set(rows[0].keys())
+    required = {"date", "delta", "reason_code", "status"}
+    return required.issubset(cols)
+
+
+def _top_mismatch_days(rows: list[dict], limit: int = 5) -> list[dict]:
+    mismatches = [r for r in rows if str(r.get("status")) == "MISMATCH"]
+    ordered = sorted(
+        mismatches,
+        key=lambda r: (
+            -abs(float(r.get("delta", 0.0))),
+            str(r.get("date", "")),
+            str(r.get("reason_code") or "UNKNOWN"),
+        ),
+    )
+    top = []
+    for row in ordered[:limit]:
+        top.append(
+            {
+                "date": str(row.get("date", "")),
+                "delta": round(float(row.get("delta", 0.0)), 2),
+                "reason_code": str(row.get("reason_code") or "UNKNOWN"),
+            }
+        )
+    return top
+
+
 def render_markdown(
     df,
     title: str,
@@ -136,25 +183,44 @@ def render_markdown(
     """Render dataframe-like rows as markdown with deterministic footer."""
     rows = _sorted_rows(_df_records(df), sort_by=sort_by, descending=descending)
     summary = _summary_values(rows)
-    if not rows:
-        return (
-            f"# {title}\n\n"
-            "## Summary\n"
-            f"- mismatched_days: {summary['mismatched_days']}\n"
-            f"- top_reason_codes: {summary['top_reason_codes']}\n"
-            f"- total_mismatch_amount: {summary['total_mismatch_amount']:.2f}\n"
-            f"- year_rollups: {summary['year_rollups_text']}\n\n"
-            f"{notes}\n\n_No rows_\n\n"
-            f"Data freshness / source: {_DETERMINISTIC_SOURCE_FOOTER}\n"
-        )
-
-    columns = list(rows[0].keys())
+    show_top_mismatch_days = _should_render_top_mismatch_days(rows)
     lines = [f"# {title}", "", "## Summary"]
     lines.append(f"- mismatched_days: {summary['mismatched_days']}")
     lines.append(f"- top_reason_codes: {summary['top_reason_codes']}")
     lines.append(f"- total_mismatch_amount: {summary['total_mismatch_amount']:.2f}")
     lines.append(f"- year_rollups: {summary['year_rollups_text']}")
+    lines.extend(["", "## How to read this"])
+    for code, description in _HOW_TO_READ_ITEMS:
+        lines.append(f"- {code}: {description}")
+    if show_top_mismatch_days:
+        lines.extend(["", "## Top mismatch days"])
+        top_rows = _top_mismatch_days(rows, limit=5)
+        if not top_rows:
+            lines.append("- none")
+        else:
+            lines.append("| date | delta | reason_code |")
+            lines.append("| --- | --- | --- |")
+            for row in top_rows:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            str(row.get("date", "")),
+                            _format_value(row.get("delta", 0.0)),
+                            str(row.get("reason_code", "")),
+                        ]
+                    )
+                    + " |"
+                )
     lines.extend(["", notes, ""])
+    if not rows:
+        lines.append("_No rows_")
+        lines.append("")
+        lines.append(f"Data freshness / source: {_DETERMINISTIC_SOURCE_FOOTER}")
+        lines.append("")
+        return "\n".join(lines)
+
+    columns = list(rows[0].keys())
     lines.append("| " + " | ".join(columns) + " |")
     lines.append("| " + " | ".join(["---"] * len(columns)) + " |")
     for row in rows:
@@ -175,26 +241,7 @@ def render_html(
     """Render dataframe-like rows as deterministic HTML."""
     rows = _sorted_rows(_df_records(df), sort_by=sort_by, descending=descending)
     summary = _summary_values(rows)
-    if not rows:
-        return (
-            "<!doctype html>\n"
-            "<html><head><meta charset=\"utf-8\"><title>"
-            + escape(title)
-            + "</title></head><body>"
-            + f"<h1>{escape(title)}</h1>"
-            + "<h2>Summary</h2>"
-            + "<ul>"
-            + f"<li>mismatched_days: {int(summary['mismatched_days'])}</li>"
-            + f"<li>top_reason_codes: {escape(str(summary['top_reason_codes']))}</li>"
-            + f"<li>total_mismatch_amount: {float(summary['total_mismatch_amount']):.2f}</li>"
-            + f"<li>year_rollups: {escape(str(summary['year_rollups_text']))}</li>"
-            + "</ul>"
-            + f"<p>{escape(notes)}</p><p><em>No rows</em></p>"
-            + f"<p>Data freshness / source: {escape(_DETERMINISTIC_SOURCE_FOOTER)}</p>"
-            + "</body></html>\n"
-        )
-
-    columns = list(rows[0].keys())
+    show_top_mismatch_days = _should_render_top_mismatch_days(rows)
     lines = [
         "<!doctype html>",
         "<html>",
@@ -217,21 +264,72 @@ def render_html(
         f"<li>total_mismatch_amount: {float(summary['total_mismatch_amount']):.2f}</li>",
         f"<li>year_rollups: {escape(str(summary['year_rollups_text']))}</li>",
         "</ul>",
-        f"<p>{escape(notes)}</p>",
-        "<table>",
-        "<thead><tr>" + "".join(f"<th>{escape(str(c))}</th>" for c in columns) + "</tr></thead>",
-        "<tbody>",
+        "<h2>How to read this</h2>",
+        "<ul>",
     ]
-    for row in rows:
-        lines.append(
-            "<tr>"
-            + "".join(f"<td>{escape(_format_value(row.get(col, '')))}</td>" for col in columns)
-            + "</tr>"
+    for code, description in _HOW_TO_READ_ITEMS:
+        lines.append(f"<li><strong>{escape(code)}</strong>: {escape(description)}</li>")
+    lines.extend(
+        [
+            "</ul>",
+        ]
+    )
+    if show_top_mismatch_days:
+        top_rows = _top_mismatch_days(rows, limit=5)
+        lines.extend(
+            [
+                "<h2>Top mismatch days</h2>",
+            ]
+        )
+        if not top_rows:
+            lines.append("<p>none</p>")
+        else:
+            lines.extend(
+                [
+                    "<table>",
+                    "<thead><tr><th>date</th><th>delta</th><th>reason_code</th></tr></thead>",
+                    "<tbody>",
+                ]
+            )
+            for row in top_rows:
+                lines.append(
+                    "<tr>"
+                    + f"<td>{escape(str(row.get('date', '')))}</td>"
+                    + f"<td>{escape(_format_value(row.get('delta', 0.0)))}</td>"
+                    + f"<td>{escape(str(row.get('reason_code', '')))}</td>"
+                    + "</tr>"
+                )
+            lines.extend(["</tbody>", "</table>"])
+    lines.extend(
+        [
+            f"<p>{escape(notes)}</p>",
+        ]
+    )
+    if not rows:
+        lines.append("<p><em>No rows</em></p>")
+    else:
+        columns = list(rows[0].keys())
+        lines.extend(
+            [
+                "<table>",
+                "<thead><tr>" + "".join(f"<th>{escape(str(c))}</th>" for c in columns) + "</tr></thead>",
+                "<tbody>",
+            ]
+        )
+        for row in rows:
+            lines.append(
+                "<tr>"
+                + "".join(f"<td>{escape(_format_value(row.get(col, '')))}</td>" for col in columns)
+                + "</tr>"
+            )
+        lines.extend(
+            [
+                "</tbody>",
+                "</table>",
+            ]
         )
     lines.extend(
         [
-            "</tbody>",
-            "</table>",
             f"<p>Data freshness / source: {escape(_DETERMINISTIC_SOURCE_FOOTER)}</p>",
             "</body>",
             "</html>",
@@ -244,11 +342,12 @@ def render_html(
 def _build_registry(normalized_root: Path | None = None) -> ReportRegistry:
     registry = ReportRegistry()
     registry.register("reconcile.daily", lambda years: run_reconcile_daily(years, normalized_root=normalized_root))
+    registry.register("reconcile.monthly", lambda years: run_reconcile_monthly(years, normalized_root=normalized_root))
     return registry
 
 
 def answer_from_spec(spec: QuerySpec, normalized_root: Path | None = None, output_format: str = "markdown") -> str:
-    if spec.source != "reconcile" or spec.analysis != "reconcile_daily":
+    if spec.source != "reconcile" or spec.analysis not in {"reconcile_daily", "reconcile_monthly"}:
         raise ValueError("spec is not a reconciliation query")
     ensure_normalized_data(spec.years, normalized_root=normalized_root)
     registry = _build_registry(normalized_root=normalized_root)
@@ -256,13 +355,21 @@ def answer_from_spec(spec: QuerySpec, normalized_root: Path | None = None, outpu
     df = executor(spec.years)
 
     years_label = ", ".join(str(y) for y in spec.years)
-    title = f"Electra vs HotelRunner Daily Reconciliation ({years_label})"
-    notes = (
-        f"Daily gross sales comparison for years: {years_label}. "
-        "Status is MATCH when abs(delta) <= 1.00; otherwise MISMATCH. "
-        "Reason priority: ROUNDING, TIMING (offsetting adjacent deltas), FEE (~3%), UNKNOWN."
-    )
-    sort_by: str | list[str] | None = ["year", "date"]
+    if spec.analysis == "reconcile_monthly":
+        title = f"Electra vs HotelRunner Monthly Reconciliation ({years_label})"
+        notes = (
+            f"Monthly gross sales comparison for years: {years_label}. "
+            "Status is MATCH when abs(delta) <= 1.00; otherwise MISMATCH."
+        )
+        sort_by: str | list[str] | None = ["year", "month"]
+    else:
+        title = f"Electra vs HotelRunner Daily Reconciliation ({years_label})"
+        notes = (
+            f"Daily gross sales comparison for years: {years_label}. "
+            "Status is MATCH when abs(delta) <= 1.00; otherwise MISMATCH. "
+            "Reason priority: ROUNDING, TIMING (offsetting adjacent deltas), FEE (~3%), UNKNOWN."
+        )
+        sort_by = ["year", "date"]
 
     if output_format == "markdown":
         return render_markdown(df, title=title, notes=notes, sort_by=sort_by, descending=False)
