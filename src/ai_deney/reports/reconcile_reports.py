@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from html import escape
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from ai_deney.intent.electra_intent import parse_electra_query
 from ai_deney.intent.query_spec import QuerySpec
 from ai_deney.parsing.electra_sales import normalize_report_files as normalize_electra_report_files
 from ai_deney.parsing.hotelrunner_sales import normalize_report_files as normalize_hotelrunner_report_files
-from ai_deney.reconcile.electra_vs_hotelrunner import reconcile_daily
+from ai_deney.reconcile.electra_vs_hotelrunner import compute_year_rollups, reconcile_daily
 from ai_deney.reports.registry import ReportRegistry
 
 _DETERMINISTIC_SOURCE_FOOTER = "Source: Electra + HotelRunner mock fixtures; Generated: deterministic run."
@@ -91,6 +92,40 @@ def _sorted_rows(rows: list[dict], sort_by: str | list[str] | None = None, desce
     return sorted(rows, key=lambda r: tuple(r.get(k) for k in keys), reverse=descending)
 
 
+def _format_top_reasons(rows: list[dict], limit: int = 3) -> str:
+    mismatches = [r for r in rows if str(r.get("status")) == "MISMATCH"]
+    if not mismatches:
+        return "none"
+    counts = Counter(str(r.get("reason_code") or "UNKNOWN") for r in mismatches)
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{code}={count}" for code, count in ordered[:limit])
+
+
+def _format_year_rollups(rollups: list[dict]) -> str:
+    if not rollups:
+        return "none"
+    parts: list[str] = []
+    for row in sorted(rollups, key=lambda r: int(r["year"])):
+        parts.append(
+            f"{int(row['year'])}: MATCH={int(row['match_count'])}, "
+            f"MISMATCH={int(row['mismatch_count'])}, "
+            f"ABS_MISMATCH={float(row['mismatch_abs_total']):.2f}"
+        )
+    return "; ".join(parts)
+
+
+def _summary_values(rows: list[dict]) -> dict:
+    mismatches = [r for r in rows if str(r.get("status")) == "MISMATCH"]
+    rollups = compute_year_rollups(rows)
+    return {
+        "mismatched_days": len(mismatches),
+        "top_reason_codes": _format_top_reasons(rows, limit=3),
+        "total_mismatch_amount": round(sum(abs(float(r.get("delta", 0.0))) for r in mismatches), 2),
+        "year_rollups": rollups,
+        "year_rollups_text": _format_year_rollups(rollups),
+    }
+
+
 def render_markdown(
     df,
     title: str,
@@ -100,14 +135,26 @@ def render_markdown(
 ) -> str:
     """Render dataframe-like rows as markdown with deterministic footer."""
     rows = _sorted_rows(_df_records(df), sort_by=sort_by, descending=descending)
+    summary = _summary_values(rows)
     if not rows:
         return (
-            f"# {title}\n\n{notes}\n\n_No rows_\n\n"
+            f"# {title}\n\n"
+            "## Summary\n"
+            f"- mismatched_days: {summary['mismatched_days']}\n"
+            f"- top_reason_codes: {summary['top_reason_codes']}\n"
+            f"- total_mismatch_amount: {summary['total_mismatch_amount']:.2f}\n"
+            f"- year_rollups: {summary['year_rollups_text']}\n\n"
+            f"{notes}\n\n_No rows_\n\n"
             f"Data freshness / source: {_DETERMINISTIC_SOURCE_FOOTER}\n"
         )
 
     columns = list(rows[0].keys())
-    lines = [f"# {title}", "", notes, ""]
+    lines = [f"# {title}", "", "## Summary"]
+    lines.append(f"- mismatched_days: {summary['mismatched_days']}")
+    lines.append(f"- top_reason_codes: {summary['top_reason_codes']}")
+    lines.append(f"- total_mismatch_amount: {summary['total_mismatch_amount']:.2f}")
+    lines.append(f"- year_rollups: {summary['year_rollups_text']}")
+    lines.extend(["", notes, ""])
     lines.append("| " + " | ".join(columns) + " |")
     lines.append("| " + " | ".join(["---"] * len(columns)) + " |")
     for row in rows:
@@ -127,13 +174,22 @@ def render_html(
 ) -> str:
     """Render dataframe-like rows as deterministic HTML."""
     rows = _sorted_rows(_df_records(df), sort_by=sort_by, descending=descending)
+    summary = _summary_values(rows)
     if not rows:
         return (
             "<!doctype html>\n"
             "<html><head><meta charset=\"utf-8\"><title>"
             + escape(title)
             + "</title></head><body>"
-            + f"<h1>{escape(title)}</h1><p>{escape(notes)}</p><p><em>No rows</em></p>"
+            + f"<h1>{escape(title)}</h1>"
+            + "<h2>Summary</h2>"
+            + "<ul>"
+            + f"<li>mismatched_days: {int(summary['mismatched_days'])}</li>"
+            + f"<li>top_reason_codes: {escape(str(summary['top_reason_codes']))}</li>"
+            + f"<li>total_mismatch_amount: {float(summary['total_mismatch_amount']):.2f}</li>"
+            + f"<li>year_rollups: {escape(str(summary['year_rollups_text']))}</li>"
+            + "</ul>"
+            + f"<p>{escape(notes)}</p><p><em>No rows</em></p>"
             + f"<p>Data freshness / source: {escape(_DETERMINISTIC_SOURCE_FOOTER)}</p>"
             + "</body></html>\n"
         )
@@ -154,6 +210,13 @@ def render_html(
         "</head>",
         "<body>",
         f"<h1>{escape(title)}</h1>",
+        "<h2>Summary</h2>",
+        "<ul>",
+        f"<li>mismatched_days: {int(summary['mismatched_days'])}</li>",
+        f"<li>top_reason_codes: {escape(str(summary['top_reason_codes']))}</li>",
+        f"<li>total_mismatch_amount: {float(summary['total_mismatch_amount']):.2f}</li>",
+        f"<li>year_rollups: {escape(str(summary['year_rollups_text']))}</li>",
+        "</ul>",
         f"<p>{escape(notes)}</p>",
         "<table>",
         "<thead><tr>" + "".join(f"<th>{escape(str(c))}</th>" for c in columns) + "</tr></thead>",
@@ -196,7 +259,8 @@ def answer_from_spec(spec: QuerySpec, normalized_root: Path | None = None, outpu
     title = f"Electra vs HotelRunner Daily Reconciliation ({years_label})"
     notes = (
         f"Daily gross sales comparison for years: {years_label}. "
-        "Status is MATCH when abs(delta) <= 1.00; otherwise MISMATCH."
+        "Status is MATCH when abs(delta) <= 1.00; otherwise MISMATCH. "
+        "Reason priority: ROUNDING, TIMING (offsetting adjacent deltas), FEE (~3%), UNKNOWN."
     )
     sort_by: str | list[str] | None = ["year", "date"]
 

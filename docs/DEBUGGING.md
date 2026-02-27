@@ -43,3 +43,24 @@ The script prints:
 - Expected prompt text is under transcript fixture path:
   - `<artifact_dir>/.../transcript/prompts/<hash>.txt`
 - Compare with your current task prompt and retry.
+
+## Local Dev Workflow
+Run deterministic offline checks from repo root with the project virtual environment active.
+
+```bash
+cd /Users/omer/ai-deney/week1
+source .venv/bin/activate
+bash scripts/dev_check.sh
+bash scripts/dev_run_all.sh
+```
+
+`scripts/dev_check.sh` fails fast on wrong directory or wrong venv and prints the recovery command.
+
+`scripts/dev_run_all.sh` executes:
+- `scripts/dev_check.sh`
+- `pytest -q`
+- `bash scripts/run_eval_pack.sh`
+- `python3 scripts/generate_truth_pack.py --out outputs/_truth_pack`
+
+Truth pack index:
+- `outputs/_truth_pack/index.md`

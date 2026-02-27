@@ -176,6 +176,27 @@ def test_answer_question_supports_reconciliation_report() -> None:
         normalized_root=normalized_root,
     )
     assert "# Electra vs HotelRunner Daily Reconciliation (2025)" in text
+    assert "## Summary" in text
+    assert "- mismatched_days: 3" in text
+    assert "- top_reason_codes: TIMING=2, UNKNOWN=1" in text
+    assert "- total_mismatch_amount: 107.00" in text
+    assert "- year_rollups: 2025: MATCH=27, MISMATCH=3, ABS_MISMATCH=107.00" in text
     assert "| date | year | electra_gross | hr_gross | delta | status | reason_code |" in text
     assert "TIMING" in text
     assert "ROUNDING" in text
+
+
+def test_answer_question_supports_reconciliation_report_html_summary() -> None:
+    tmp_root = _repo_tmp_dir("reconcile_html")
+    normalized_root = tmp_root / "normalized"
+    text = answer_question(
+        "compare electra vs hotelrunner for 2026",
+        normalized_root=normalized_root,
+        output_format="html",
+    )
+    assert "<!doctype html>" in text.lower()
+    assert "<h2>Summary</h2>" in text
+    assert "mismatched_days: 3" in text
+    assert "top_reason_codes: TIMING=2, UNKNOWN=1" in text
+    assert "total_mismatch_amount: 106.00" in text
+    assert "year_rollups: 2026: MATCH=27, MISMATCH=3, ABS_MISMATCH=106.00" in text

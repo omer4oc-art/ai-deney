@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ai_deney.parsing.hotelrunner_sales import validate_requested_years_exist as validate_hr_years_exist
@@ -16,6 +16,9 @@ except Exception:  # pragma: no cover
 
 _ROUNDING_TOLERANCE = 1.0
 _TIMING_TOLERANCE = 1.0
+_FEE_TARGET_RATIO = 0.03
+_FEE_RATIO_TOLERANCE = 0.0025
+_FEE_MIN_BASE = 20.0
 
 
 @dataclass
@@ -23,6 +26,7 @@ class _MiniDataFrame:
     """Minimal DataFrame-compatible object for environments without pandas."""
 
     rows: list[dict]
+    year_rollups: list[dict] = field(default_factory=list)
 
     def to_dict(self, orient: str = "records") -> list[dict]:
         if orient != "records":
@@ -33,10 +37,16 @@ class _MiniDataFrame:
         return len(self.rows)
 
 
-def _to_dataframe(rows: list[dict]):
+def _to_dataframe(rows: list[dict], year_rollups: list[dict] | None = None):
+    rollups = [dict(r) for r in (year_rollups or [])]
     if pd is not None:
-        return pd.DataFrame(rows)
-    return _MiniDataFrame(rows)
+        df = pd.DataFrame(rows)
+        try:
+            df.attrs["year_rollups"] = rollups
+        except Exception:
+            pass
+        return df
+    return _MiniDataFrame(rows=rows, year_rollups=rollups)
 
 
 def _validate_electra_years_exist(years: list[int], normalized_root: Path) -> None:
@@ -87,6 +97,64 @@ def _is_timing_pair(delta: float, neighbor_delta: float) -> bool:
     return abs(delta + neighbor_delta) <= _TIMING_TOLERANCE
 
 
+def _is_fee_like(delta: float, electra_gross: float, hr_gross: float) -> bool:
+    amount = abs(delta)
+    if amount <= _ROUNDING_TOLERANCE:
+        return False
+    for base in (abs(electra_gross), abs(hr_gross)):
+        if base < _FEE_MIN_BASE:
+            continue
+        ratio = amount / base
+        if abs(ratio - _FEE_TARGET_RATIO) <= _FEE_RATIO_TOLERANCE:
+            return True
+    return False
+
+
+def _df_rows(df_or_rows) -> list[dict]:
+    if isinstance(df_or_rows, list):
+        return [dict(r) for r in df_or_rows]
+    if hasattr(df_or_rows, "to_dict"):
+        return [dict(r) for r in df_or_rows.to_dict("records")]
+    raise TypeError("expected list[dict] or dataframe-like object")
+
+
+def compute_year_rollups(df_or_rows) -> list[dict]:
+    """
+    Build deterministic per-year reconciliation rollups.
+
+    Output columns:
+    - year
+    - match_count
+    - mismatch_count
+    - mismatch_abs_total
+    """
+    rows = _df_rows(df_or_rows)
+    by_year: dict[int, dict] = {}
+    for row in rows:
+        year = int(row["year"])
+        bucket = by_year.setdefault(
+            year,
+            {
+                "year": year,
+                "match_count": 0,
+                "mismatch_count": 0,
+                "mismatch_abs_total": 0.0,
+            },
+        )
+        if str(row.get("status")) == "MATCH":
+            bucket["match_count"] += 1
+        else:
+            bucket["mismatch_count"] += 1
+            bucket["mismatch_abs_total"] += abs(float(row.get("delta", 0.0)))
+
+    rollups = []
+    for year in sorted(by_year):
+        bucket = dict(by_year[year])
+        bucket["mismatch_abs_total"] = round(float(bucket["mismatch_abs_total"]), 2)
+        rollups.append(bucket)
+    return rollups
+
+
 def reconcile_daily(years: list[int], normalized_root_electra: Path, normalized_root_hr: Path):
     """
     Reconcile daily gross sales between Electra and HotelRunner.
@@ -98,7 +166,7 @@ def reconcile_daily(years: list[int], normalized_root_electra: Path, normalized_
     - hr_gross
     - delta (electra_gross - hr_gross)
     - status: MATCH | MISMATCH
-    - reason_code: ROUNDING | TIMING | UNKNOWN
+    - reason_code: ROUNDING | TIMING | FEE | UNKNOWN
     """
 
     years_i = sorted(set(int(y) for y in years))
@@ -129,7 +197,7 @@ def reconcile_daily(years: list[int], normalized_root_electra: Path, normalized_
             }
         )
 
-    # Basic timing heuristic: if delta and adjacent-day delta offset each other.
+    # TIMING heuristic on observed day-window=1 (previous or next row in the year).
     rows_by_year: dict[int, list[dict]] = {}
     for row in rows:
         rows_by_year.setdefault(int(row["year"]), []).append(row)
@@ -151,5 +219,18 @@ def reconcile_daily(years: list[int], normalized_root_electra: Path, normalized_
             if is_timing:
                 row["reason_code"] = "TIMING"
 
+    # FEE heuristic applies to remaining mismatches not explained by timing.
+    for year in rows_by_year:
+        year_rows = rows_by_year[year]
+        for row in year_rows:
+            if row["status"] != "MISMATCH" or row["reason_code"] != "UNKNOWN":
+                continue
+            if _is_fee_like(
+                delta=float(row["delta"]),
+                electra_gross=float(row["electra_gross"]),
+                hr_gross=float(row["hr_gross"]),
+            ):
+                row["reason_code"] = "FEE"
+
     rows.sort(key=lambda r: (r["year"], r["date"]))
-    return _to_dataframe(rows)
+    return _to_dataframe(rows, year_rollups=compute_year_rollups(rows))
