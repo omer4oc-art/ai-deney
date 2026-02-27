@@ -19,8 +19,12 @@ AnalysisName = Literal[
     "reconcile_daily_by_agency",
     "reconcile_monthly_by_agency",
     "reconcile_anomalies_agency",
+    "mapping_health_agency",
+    "mapping_health_channel",
+    "mapping_unmapped_agency",
+    "mapping_drift_agency",
 ]
-SourceName = Literal["electra", "reconcile"]
+SourceName = Literal["electra", "reconcile", "mapping"]
 
 
 @dataclass(frozen=True)
@@ -54,5 +58,9 @@ class QuerySpec:
             if self.analysis == "reconcile_anomalies_agency":
                 return "reconcile.anomalies_agency"
             return "reconcile.daily"
+        if self.source == "mapping":
+            if self.analysis == "mapping_health_channel":
+                return "mapping.health_channel"
+            return "mapping.health_agency"
         key = self.analysis or self.report
         return f"electra.{key}"

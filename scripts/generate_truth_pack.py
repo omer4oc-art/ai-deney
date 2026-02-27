@@ -31,6 +31,10 @@ QUESTIONS = [
     "monthly reconciliation by agency 2026 electra hotelrunner",
     "any anomalies by agency in 2025",
     "any anomalies by agency in 2026",
+    "mapping health report 2025",
+    "mapping health report 2026",
+    "which agencies are unmapped in 2026",
+    "agency drift electra vs hotelrunner 2025",
 ]
 
 

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import csv
-import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ai_deney.mapping.loader import MappingBundle, enrich_row, load_mapping_bundle
 from ai_deney.parsing.electra_sales import TOTAL_AGENCY_ID
 from ai_deney.parsing.hotelrunner_sales import validate_requested_years_exist as validate_hr_years_exist
 
@@ -103,20 +103,16 @@ def _validate_dim(dim: str) -> str:
     return clean
 
 
-_NON_ALNUM_RE = re.compile(r"[^A-Z0-9]+")
-_CHANNEL_TO_AGENCY: dict[str, tuple[str, str]] = {
-    "direct": ("DIRECT", "Direct Channel"),
-    "booking.com": ("AG001", "Atlas Partners"),
-    "expedia": ("AG002", "Beacon Agency"),
-    "agoda": ("AG003", "Cedar Travel"),
-    "hotelbeds": ("AG004", "Drift Voyages"),
-    "wholesaler": ("AG005", "Elm Holidays"),
-    "wholesalerx": ("AG005", "Elm Holidays"),
-}
-
-
 def _normalize_agency_id(raw: str) -> str:
-    cleaned = _NON_ALNUM_RE.sub("_", (raw or "").strip().upper()).strip("_")
+    out = []
+    for ch in str(raw or "").strip().upper():
+        if ch.isalnum():
+            out.append(ch)
+        elif ch in {" ", "-", ".", "/", "&"}:
+            out.append("_")
+    cleaned = "".join(out).strip("_")
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
     return cleaned or "UNKNOWN"
 
 
@@ -125,23 +121,41 @@ def _electra_dim_value(row: dict, dim: str) -> str | None:
     if agency_id == TOTAL_AGENCY_ID:
         return None
     if dim == _DIM_AGENCY:
-        return agency_id or None
+        canon_agency_id = str(row.get("canon_agency_id") or "").strip()
+        canon_agency_name = str(row.get("canon_agency_name") or "").strip()
+        if canon_agency_id:
+            return canon_agency_id
+        if canon_agency_name:
+            return canon_agency_name
+        return agency_id or str(row.get("agency_name") or "").strip() or None
+    canon_channel = str(row.get("canon_channel") or "").strip()
+    if canon_channel:
+        return canon_channel
     agency_name = str(row.get("agency_name") or "").strip()
     return agency_name or None
 
 
 def _hotelrunner_dim_value(row: dict, dim: str) -> str | None:
     if dim == _DIM_AGENCY:
+        canon_agency_id = str(row.get("canon_agency_id") or "").strip()
+        canon_agency_name = str(row.get("canon_agency_name") or "").strip()
+        if canon_agency_id:
+            return canon_agency_id
+        if canon_agency_name:
+            return canon_agency_name
         agency_id = str(row.get("agency_id") or "").strip()
         if agency_id:
             return agency_id
+        agency_name = str(row.get("agency_name") or "").strip()
+        if agency_name:
+            return agency_name
         channel = str(row.get("channel") or row.get("agency") or "").strip()
         if channel:
-            mapped = _CHANNEL_TO_AGENCY.get(channel.lower())
-            if mapped:
-                return mapped[0]
             return _normalize_agency_id(channel)
         return None
+    canon_channel = str(row.get("canon_channel") or "").strip()
+    if canon_channel:
+        return canon_channel
     channel = str(row.get("channel") or row.get("agency_name") or row.get("agency") or "").strip()
     if channel:
         return channel
@@ -150,7 +164,7 @@ def _hotelrunner_dim_value(row: dict, dim: str) -> str | None:
 
 
 def _read_electra_daily_by_dim(
-    years: list[int], normalized_root: Path, dim: str
+    years: list[int], normalized_root: Path, dim: str, mapping: MappingBundle
 ) -> dict[tuple[int, str, str], float]:
     _validate_electra_years_exist(years, normalized_root)
     out: dict[tuple[int, str, str], float] = {}
@@ -158,17 +172,18 @@ def _read_electra_daily_by_dim(
         path = normalized_root / f"electra_sales_{year}.csv"
         with path.open("r", encoding="utf-8", newline="") as f:
             for row in csv.DictReader(f):
-                dim_value = _electra_dim_value(row, dim=dim)
+                enriched = enrich_row(row, source_system="electra", mapping=mapping)
+                dim_value = _electra_dim_value(enriched, dim=dim)
                 if not dim_value:
                     continue
-                date = str(row["date"]).strip()
+                date = str(enriched["date"]).strip()
                 key = (year, date, dim_value)
-                out[key] = out.get(key, 0.0) + float(row["gross_sales"])
+                out[key] = out.get(key, 0.0) + float(enriched["gross_sales"])
     return out
 
 
 def _read_hotelrunner_daily_by_dim(
-    years: list[int], normalized_root: Path, dim: str
+    years: list[int], normalized_root: Path, dim: str, mapping: MappingBundle
 ) -> dict[tuple[int, str, str], float]:
     validate_hr_years_exist(years, normalized_root)
     out: dict[tuple[int, str, str], float] = {}
@@ -176,12 +191,13 @@ def _read_hotelrunner_daily_by_dim(
         path = normalized_root / f"hotelrunner_sales_{year}.csv"
         with path.open("r", encoding="utf-8", newline="") as f:
             for row in csv.DictReader(f):
-                dim_value = _hotelrunner_dim_value(row, dim=dim)
+                enriched = enrich_row(row, source_system="hotelrunner", mapping=mapping)
+                dim_value = _hotelrunner_dim_value(enriched, dim=dim)
                 if not dim_value:
                     continue
-                date = str(row["date"]).strip()
+                date = str(enriched["date"]).strip()
                 key = (year, date, dim_value)
-                out[key] = out.get(key, 0.0) + float(row["gross_sales"])
+                out[key] = out.get(key, 0.0) + float(enriched["gross_sales"])
     return out
 
 
@@ -391,6 +407,8 @@ def reconcile_by_dim_daily(
     dim: str,
     normalized_root_electra: Path,
     normalized_root_hr: Path,
+    mapping_agencies_path: Path | None = None,
+    mapping_channels_path: Path | None = None,
 ):
     """
     Reconcile daily gross sales by a common dimension (agency/channel).
@@ -407,8 +425,12 @@ def reconcile_by_dim_daily(
     """
     dim_clean = _validate_dim(dim)
     years_i = sorted(set(int(y) for y in years))
-    electra_by_dim = _read_electra_daily_by_dim(years_i, normalized_root_electra, dim=dim_clean)
-    hr_by_dim = _read_hotelrunner_daily_by_dim(years_i, normalized_root_hr, dim=dim_clean)
+    mapping = load_mapping_bundle(
+        mapping_agencies_path=mapping_agencies_path,
+        mapping_channels_path=mapping_channels_path,
+    )
+    electra_by_dim = _read_electra_daily_by_dim(years_i, normalized_root_electra, dim=dim_clean, mapping=mapping)
+    hr_by_dim = _read_hotelrunner_daily_by_dim(years_i, normalized_root_hr, dim=dim_clean, mapping=mapping)
     keys = sorted(
         set(electra_by_dim.keys()) | set(hr_by_dim.keys()),
         key=lambda x: (x[0], x[1], x[2]),
@@ -476,6 +498,8 @@ def reconcile_by_dim_monthly(
     dim: str,
     normalized_root_electra: Path,
     normalized_root_hr: Path,
+    mapping_agencies_path: Path | None = None,
+    mapping_channels_path: Path | None = None,
 ):
     """
     Reconcile monthly gross sales by a common dimension (agency/channel).
@@ -497,6 +521,8 @@ def reconcile_by_dim_monthly(
             dim=dim_clean,
             normalized_root_electra=normalized_root_electra,
             normalized_root_hr=normalized_root_hr,
+            mapping_agencies_path=mapping_agencies_path,
+            mapping_channels_path=mapping_channels_path,
         )
     )
     by_month: dict[tuple[int, str, str], dict] = {}
@@ -662,6 +688,8 @@ def detect_anomalies_daily_by_dim(
     dim: str,
     normalized_root_electra: Path,
     normalized_root_hr: Path,
+    mapping_agencies_path: Path | None = None,
+    mapping_channels_path: Path | None = None,
 ):
     """
     Detect deterministic anomalies from daily by-dimension reconciliation rows.
@@ -679,6 +707,8 @@ def detect_anomalies_daily_by_dim(
             dim=dim,
             normalized_root_electra=normalized_root_electra,
             normalized_root_hr=normalized_root_hr,
+            mapping_agencies_path=mapping_agencies_path,
+            mapping_channels_path=mapping_channels_path,
         )
     )
     anomalies = _detect_anomalies_from_rows(rows, period_field="date")
@@ -690,6 +720,8 @@ def detect_anomalies_monthly_by_dim(
     dim: str,
     normalized_root_electra: Path,
     normalized_root_hr: Path,
+    mapping_agencies_path: Path | None = None,
+    mapping_channels_path: Path | None = None,
 ):
     """
     Detect deterministic anomalies from monthly by-dimension reconciliation rows.
@@ -707,6 +739,8 @@ def detect_anomalies_monthly_by_dim(
             dim=dim,
             normalized_root_electra=normalized_root_electra,
             normalized_root_hr=normalized_root_hr,
+            mapping_agencies_path=mapping_agencies_path,
+            mapping_channels_path=mapping_channels_path,
         )
     )
     anomalies = _detect_anomalies_from_rows(rows, period_field="month")

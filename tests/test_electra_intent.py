@@ -107,3 +107,27 @@ def test_parse_reconciliation_anomaly_by_agency_patterns() -> None:
     assert spec.group_by == "agency"
     assert spec.registry_key == "reconcile.anomalies_agency"
     assert spec.years == [2025]
+
+
+def test_parse_mapping_health_agency_pattern() -> None:
+    spec = parse_electra_query("mapping health report 2025")
+    assert spec.source == "mapping"
+    assert spec.analysis == "mapping_health_agency"
+    assert spec.registry_key == "mapping.health_agency"
+    assert spec.years == [2025]
+
+
+def test_parse_mapping_unmapped_agencies_pattern() -> None:
+    spec = parse_electra_query("which agencies are unmapped in 2026")
+    assert spec.source == "mapping"
+    assert spec.analysis == "mapping_unmapped_agency"
+    assert spec.registry_key == "mapping.health_agency"
+    assert spec.years == [2026]
+
+
+def test_parse_mapping_drift_pattern() -> None:
+    spec = parse_electra_query("agency drift electra vs hotelrunner 2025")
+    assert spec.source == "mapping"
+    assert spec.analysis == "mapping_drift_agency"
+    assert spec.registry_key == "mapping.health_agency"
+    assert spec.years == [2025]

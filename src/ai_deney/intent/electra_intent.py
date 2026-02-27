@@ -21,6 +21,9 @@ _SUPPORTED_EXAMPLES = [
     "where do electra and hotelrunner differ by agency in 2025",
     "monthly reconciliation by agency 2026 electra hotelrunner",
     "any anomalies by agency in 2025",
+    "mapping health report 2025",
+    "which agencies are unmapped in 2026",
+    "agency drift electra vs hotelrunner 2025",
 ]
 
 
@@ -64,6 +67,8 @@ def parse_electra_query(text: str) -> QuerySpec:
     mentions_hotelrunner = ("hotelrunner" in lowered) or ("hotel runner" in lowered)
     asks_reconcile = ("differ" in lowered) or ("difference" in lowered) or compare or ("reconcil" in lowered)
     asks_anomaly = "anomal" in lowered
+    asks_mapping = ("mapping" in lowered) or ("unmapped" in lowered) or ("drift" in lowered)
+    asks_channel = "channel" in lowered
     is_reconciliation = mentions_electra and mentions_hotelrunner and asks_reconcile
     is_monthly_reconciliation = is_reconciliation and (
         ("monthly" in lowered) or ("by month" in lowered)
@@ -73,8 +78,32 @@ def parse_electra_query(text: str) -> QuerySpec:
         ("monthly" in lowered) or ("by month" in lowered)
     )
     is_agency_anomaly = asks_anomaly and has_agency
+    is_mapping_health = asks_mapping and ("health" in lowered)
+    is_mapping_health_channel = is_mapping_health and asks_channel
+    is_mapping_unmapped_agency = ("unmapped" in lowered) and has_agency
+    is_mapping_drift_agency = ("drift" in lowered) and has_agency and mentions_electra and mentions_hotelrunner
 
-    if is_agency_anomaly:
+    if is_mapping_health_channel:
+        report = "sales_by_agency"
+        group_by = None
+        analysis = "mapping_health_channel"
+        source = "mapping"
+    elif is_mapping_unmapped_agency:
+        report = "sales_by_agency"
+        group_by = "agency"
+        analysis = "mapping_unmapped_agency"
+        source = "mapping"
+    elif is_mapping_drift_agency:
+        report = "sales_by_agency"
+        group_by = "agency"
+        analysis = "mapping_drift_agency"
+        source = "mapping"
+    elif is_mapping_health:
+        report = "sales_by_agency"
+        group_by = "agency"
+        analysis = "mapping_health_agency"
+        source = "mapping"
+    elif is_agency_anomaly:
         report = "sales_by_agency"
         group_by = "agency"
         analysis = "reconcile_anomalies_agency"

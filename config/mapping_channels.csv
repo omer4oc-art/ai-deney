@@ -1,0 +1,14 @@
+source_system,source_channel,canon_channel
+electra,Direct Channel,DIRECT
+electra,Atlas Partners,AGENCY
+electra,Beacon Agency,AGENCY
+electra,Cedar Travel,AGENCY
+electra,Drift Voyages,AGENCY
+electra,Elm Holidays,AGENCY
+hotelrunner,Direct,DIRECT
+hotelrunner,Booking.com,OTA
+hotelrunner,Expedia,OTA
+hotelrunner,Agoda,OTA
+hotelrunner,Hotelbeds,OTA
+hotelrunner,Wholesaler,AGENCY
+hotelrunner,WholesalerX,AGENCY

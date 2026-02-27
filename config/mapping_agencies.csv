@@ -1,0 +1,13 @@
+source_system,source_agency_id,source_agency_name,canon_agency_id,canon_agency_name,notes
+electra,AG001,Atlas Partners,AG001,Atlas Partners,primary electra agency mapping
+electra,AG002,Beacon Agency,AG002,Beacon Agency,primary electra agency mapping
+electra,AG003,Cedar Travel,AG003,Cedar Travel,primary electra agency mapping
+electra,AG004,Drift Voyages,AG004,Drift Voyages,primary electra agency mapping
+electra,AG005,Elm Holidays,AG005,Elm Holidays,primary electra agency mapping
+electra,DIRECT,Direct Channel,DIRECT,Direct Channel,primary electra agency mapping
+hotelrunner,AG001,Atlas Partners,AG001,Atlas Partners,primary hotelrunner agency mapping
+hotelrunner,AG002,Beacon Agency,AG002,Beacon Agency,primary hotelrunner agency mapping
+hotelrunner,AG003,Cedar Travel,AG003,Cedar Travel,primary hotelrunner agency mapping
+hotelrunner,AG004,Drift Voyages,AG004,Drift Voyages,primary hotelrunner agency mapping
+hotelrunner,AG005,Elm Holidays,AG005,Elm Holidays,primary hotelrunner agency mapping
+hotelrunner,DIRECT,Direct Channel,DIRECT,Direct Channel,primary hotelrunner agency mapping

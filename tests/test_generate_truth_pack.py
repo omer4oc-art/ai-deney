@@ -32,8 +32,15 @@ def test_generate_truth_pack_script_creates_index_and_bundle() -> None:
     assert "where do electra and hotelrunner differ by agency in 2025" in index_text
     assert "monthly reconciliation by agency 2026 electra hotelrunner" in index_text
     assert "any anomalies by agency in 2026" in index_text
+    assert "mapping health report 2025" in index_text
+    assert "which agencies are unmapped in 2026" in index_text
+    assert "agency drift electra vs hotelrunner 2025" in index_text
 
     bundle_text = bundle_path.read_text(encoding="utf-8")
     assert "===== FILE: index.md =====" in bundle_text
     assert "Data freshness / source: Source: Electra mock fixtures; Generated: deterministic run." in bundle_text
     assert "Data freshness / source: Source: Electra + HotelRunner mock fixtures; Generated: deterministic run." in bundle_text
+    assert (
+        "Data freshness / source: Source: Electra + HotelRunner mock fixtures + mapping config; Generated: deterministic run."
+        in bundle_text
+    )

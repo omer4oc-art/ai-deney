@@ -258,3 +258,35 @@ def test_answer_question_supports_anomalies_by_agency_report() -> None:
     assert "## Top mismatch contributors" in text
     assert "## Top anomalies" in text
     assert "NEW_DIM_VALUE" in text
+
+
+def test_answer_question_supports_mapping_health_report() -> None:
+    tmp_root = _repo_tmp_dir("mapping_health")
+    normalized_root = tmp_root / "normalized"
+    text = answer_question(
+        "mapping health report 2026",
+        normalized_root=normalized_root,
+    )
+    assert "# Mapping Health by Agency (2026)" in text
+    assert "## Unmapped" in text
+    assert "## Collisions" in text
+    assert "## Drift" in text
+    assert "AGNEW" in text
+
+
+def test_answer_question_supports_mapping_unmapped_and_drift_queries() -> None:
+    tmp_root = _repo_tmp_dir("mapping_unmapped_drift")
+    normalized_root = tmp_root / "normalized"
+
+    unmapped = answer_question(
+        "which agencies are unmapped in 2026",
+        normalized_root=normalized_root,
+    )
+    assert "# Unmapped Agencies (2026)" in unmapped
+    assert "AGNEW" in unmapped
+
+    drift = answer_question(
+        "agency drift electra vs hotelrunner 2025",
+        normalized_root=normalized_root,
+    )
+    assert "# Agency Drift Electra vs HotelRunner (2025)" in drift
