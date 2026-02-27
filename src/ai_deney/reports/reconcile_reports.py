@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from collections import Counter
 from html import escape
 from pathlib import Path
@@ -10,7 +11,7 @@ from ai_deney.connectors.electra_mock import ElectraMockConnector
 from ai_deney.connectors.hotelrunner_mock import HotelRunnerMockConnector
 from ai_deney.intent.electra_intent import parse_electra_query
 from ai_deney.intent.query_spec import QuerySpec
-from ai_deney.parsing.electra_sales import normalize_report_files as normalize_electra_report_files
+from ai_deney.parsing.electra_sales import TOTAL_AGENCY_ID, normalize_report_files as normalize_electra_report_files
 from ai_deney.parsing.hotelrunner_sales import normalize_report_files as normalize_hotelrunner_report_files
 from ai_deney.reconcile.electra_vs_hotelrunner import compute_year_rollups, reconcile_daily, reconcile_monthly
 from ai_deney.reports.registry import ReportRegistry
@@ -47,6 +48,29 @@ def _assert_within_repo(path: Path, repo: Path) -> None:
         raise ValueError(f"path escapes repo root: {path}") from exc
 
 
+def _electra_year_data_flags(year: int, normalized_root: Path) -> tuple[bool, bool]:
+    path = normalized_root / f"electra_sales_{int(year)}.csv"
+    if not path.exists():
+        return False, False
+
+    has_summary = False
+    has_agency = False
+    with path.open("r", encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            agency_id = str(row.get("agency_id") or "").strip()
+            if agency_id == TOTAL_AGENCY_ID:
+                has_summary = True
+            elif agency_id:
+                has_agency = True
+            if has_summary and has_agency:
+                break
+    return has_summary, has_agency
+
+
+def _hotelrunner_year_exists(year: int, normalized_root: Path) -> bool:
+    return (normalized_root / f"hotelrunner_sales_{int(year)}.csv").exists()
+
+
 def _df_records(df) -> list[dict]:
     if hasattr(df, "to_dict"):
         return df.to_dict("records")
@@ -67,15 +91,33 @@ def ensure_normalized_data(
     for path in (normalized, raw_electra, raw_hotelrunner):
         _assert_within_repo(path, repo)
 
-    electra_conn = ElectraMockConnector(repo_root=repo, raw_root=raw_electra)
-    electra_summary_paths = electra_conn.fetch_report("sales_summary", {"years": years})
-    normalize_electra_report_files(electra_summary_paths, report_type="sales_summary", output_root=normalized)
-    electra_agency_paths = electra_conn.fetch_report("sales_by_agency", {"years": years})
-    normalize_electra_report_files(electra_agency_paths, report_type="sales_by_agency", output_root=normalized)
+    years_i = sorted({int(y) for y in years})
+    missing_electra_summary_years: list[int] = []
+    missing_electra_agency_years: list[int] = []
+    missing_hotelrunner_years: list[int] = []
 
-    hotelrunner_conn = HotelRunnerMockConnector(repo_root=repo, raw_root=raw_hotelrunner)
-    hotelrunner_paths = hotelrunner_conn.fetch_report("daily_sales", {"years": years})
-    normalize_hotelrunner_report_files(hotelrunner_paths, output_root=normalized)
+    for year in years_i:
+        has_summary, has_agency = _electra_year_data_flags(year, normalized)
+        if not has_summary:
+            missing_electra_summary_years.append(year)
+        if not has_agency:
+            missing_electra_agency_years.append(year)
+        if not _hotelrunner_year_exists(year, normalized):
+            missing_hotelrunner_years.append(year)
+
+    if missing_electra_summary_years or missing_electra_agency_years:
+        electra_conn = ElectraMockConnector(repo_root=repo, raw_root=raw_electra)
+        if missing_electra_summary_years:
+            electra_summary_paths = electra_conn.fetch_report("sales_summary", {"years": missing_electra_summary_years})
+            normalize_electra_report_files(electra_summary_paths, report_type="sales_summary", output_root=normalized)
+        if missing_electra_agency_years:
+            electra_agency_paths = electra_conn.fetch_report("sales_by_agency", {"years": missing_electra_agency_years})
+            normalize_electra_report_files(electra_agency_paths, report_type="sales_by_agency", output_root=normalized)
+
+    if missing_hotelrunner_years:
+        hotelrunner_conn = HotelRunnerMockConnector(repo_root=repo, raw_root=raw_hotelrunner)
+        hotelrunner_paths = hotelrunner_conn.fetch_report("daily_sales", {"years": missing_hotelrunner_years})
+        normalize_hotelrunner_report_files(hotelrunner_paths, output_root=normalized)
 
 
 def run_reconcile_daily(years: list[int], normalized_root: Path | None = None):

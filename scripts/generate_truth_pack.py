@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -41,6 +42,12 @@ QUESTIONS = [
     "mapping unknown rate improvement 2026",
 ]
 
+REQUIRED_INBOX_REPORT_KEYS = (
+    ("electra", "sales_summary"),
+    ("electra", "sales_by_agency"),
+    ("hotelrunner", "daily_sales"),
+)
+
 
 def _slug(i: int, question: str) -> str:
     raw = question.lower()
@@ -65,6 +72,34 @@ def _parse_args() -> argparse.Namespace:
         default="outputs/_truth_pack",
         help="Output directory inside repo (default: outputs/_truth_pack)",
     )
+    parser.add_argument(
+        "--use-inbox",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="Use inbox drop-folder ingestion when set to 1; behavior depends on --inbox-policy.",
+    )
+    parser.add_argument(
+        "--inbox-root",
+        default="",
+        help="Optional custom inbox root (defaults to data/inbox under repo root).",
+    )
+    parser.add_argument(
+        "--max-inbox-mb",
+        type=float,
+        default=25.0,
+        help="Max accepted inbox file size in MB (default: 25).",
+    )
+    parser.add_argument(
+        "--inbox-policy",
+        default="strict",
+        choices=["strict", "partial"],
+        help=(
+            "Inbox coverage policy when --use-inbox=1. "
+            "'strict' requires all years used by truth-pack questions; "
+            "'partial' ingests complete years only and skips unsupported questions."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -73,6 +108,53 @@ def _assert_within_repo(path: Path, repo_root: Path) -> None:
         path.resolve().relative_to(repo_root.resolve())
     except Exception as exc:
         raise ValueError(f"path escapes repo root: {path}") from exc
+
+
+def _extract_years(text: str) -> list[int]:
+    return sorted({int(m) for m in re.findall(r"\b(20\d{2})\b", text)})
+
+
+def _question_years(questions: list[str]) -> list[int]:
+    years: set[int] = set()
+    for question in questions:
+        years.update(_extract_years(question))
+    if not years:
+        raise ValueError("unable to infer requested years from truth-pack questions")
+    return sorted(years)
+
+
+def _filter_questions_for_years(
+    questions: list[str],
+    allowed_years: set[int],
+) -> tuple[list[str], list[dict[str, object]]]:
+    selected: list[str] = []
+    skipped: list[dict[str, object]] = []
+    for question in questions:
+        q_years = _extract_years(question)
+        if q_years and not set(q_years).issubset(allowed_years):
+            skipped.append({"question": question, "required_years": q_years})
+            continue
+        selected.append(question)
+    return selected, skipped
+
+
+def _format_years(years: list[int]) -> str:
+    uniq = sorted({int(y) for y in years})
+    return "[" + ", ".join(str(y) for y in uniq) + "]"
+
+
+def _complete_years_from_candidates(candidates: list[object], years: list[int]) -> list[int]:
+    years_i = sorted({int(y) for y in years})
+    available = {
+        (str(getattr(candidate, "source")), str(getattr(candidate, "report_type")), int(getattr(candidate, "year")))
+        for candidate in candidates
+        if int(getattr(candidate, "year")) in years_i
+    }
+    complete: list[int] = []
+    for year in years_i:
+        if all((source, report_type, year) in available for source, report_type in REQUIRED_INBOX_REPORT_KEYS):
+            complete.append(year)
+    return complete
 
 
 def main() -> int:
@@ -92,9 +174,102 @@ def main() -> int:
     _assert_within_repo(outdir, repo_root)
     outdir.mkdir(parents=True, exist_ok=True)
     normalized_root = outdir / "_normalized"
+    selected_questions = list(QUESTIONS)
+    skipped_questions: list[dict[str, object]] = []
+    index_notes: list[str] = []
+    fallback_reason: str | None = None
+
+    if int(args.use_inbox) == 1:
+        from ai_deney.inbox.ingest import ingest_inbox_for_years
+        from ai_deney.inbox.scan import InboxNoFilesError, InboxScanError, scan_inbox_candidates
+        from ai_deney.inbox.validate import InboxValidationError
+
+        years = _question_years(QUESTIONS)
+        index_notes.append(f"Inbox policy: {args.inbox_policy}")
+        inbox_root: Path | None = None
+        if str(args.inbox_root or "").strip():
+            inbox_root = Path(args.inbox_root)
+            if not inbox_root.is_absolute():
+                inbox_root = repo_root / inbox_root
+            inbox_root = inbox_root.resolve()
+            _assert_within_repo(inbox_root, repo_root)
+        max_file_size_bytes = max(1, int(float(args.max_inbox_mb) * 1024 * 1024))
+
+        if args.inbox_policy == "strict":
+            try:
+                ingest_result = ingest_inbox_for_years(
+                    years=years,
+                    repo_root=repo_root,
+                    inbox_root=inbox_root,
+                    max_file_size_bytes=max_file_size_bytes,
+                )
+                normalized_root = ingest_result.normalized_root
+                print(f"INBOX: using run_id={ingest_result.run_id}")
+                print(f"INBOX: manifest={ingest_result.manifest_path.resolve()}")
+                index_notes.append(
+                    "SOURCE: inbox; ingested years: "
+                    + _format_years(years)
+                    + "; skipped years: []"
+                )
+            except (InboxNoFilesError, InboxScanError, InboxValidationError, ValueError) as exc:
+                print(f"INBOX: {exc}")
+                print("INBOX: falling back to deterministic fixtures")
+                fallback_reason = str(exc)
+                index_notes.append("SOURCE: fixtures (inbox fallback)")
+                skipped_questions = []
+        else:
+            complete_years: list[int] = []
+            try:
+                candidates = scan_inbox_candidates(repo_root=repo_root, inbox_root=inbox_root)
+                complete_years = _complete_years_from_candidates(candidates=candidates, years=years)
+                skipped_years = [year for year in years if year not in complete_years]
+
+                if complete_years:
+                    ingest_result = ingest_inbox_for_years(
+                        years=complete_years,
+                        repo_root=repo_root,
+                        inbox_root=inbox_root,
+                        max_file_size_bytes=max_file_size_bytes,
+                    )
+                    normalized_root = ingest_result.normalized_root
+                    print(f"INBOX: using run_id={ingest_result.run_id}")
+                    print(f"INBOX: manifest={ingest_result.manifest_path.resolve()}")
+                else:
+                    print("INBOX: partial policy found no complete years; skipping inbox ingestion")
+
+                if skipped_years:
+                    print(
+                        "INBOX: partial policy skipped years with missing inbox files: "
+                        + ", ".join(str(y) for y in skipped_years)
+                    )
+
+                index_notes.append(
+                    "SOURCE: inbox; ingested years: "
+                    + _format_years(complete_years)
+                    + "; skipped years: "
+                    + _format_years(skipped_years)
+                )
+
+                selected_questions, skipped_questions = _filter_questions_for_years(
+                    QUESTIONS,
+                    allowed_years=set(complete_years),
+                )
+                if skipped_questions:
+                    print(
+                        "INBOX: partial policy skipped "
+                        + str(len(skipped_questions))
+                        + " question(s) due to missing inbox years"
+                    )
+            except (InboxNoFilesError, InboxScanError, InboxValidationError, ValueError) as exc:
+                print(f"INBOX: {exc}")
+                print("INBOX: falling back to deterministic fixtures")
+                fallback_reason = str(exc)
+                index_notes.append("SOURCE: fixtures (inbox fallback)")
+                selected_questions = list(QUESTIONS)
+                skipped_questions = []
 
     entries: list[dict] = []
-    for i, question in enumerate(QUESTIONS, start=1):
+    for i, question in enumerate(selected_questions, start=1):
         slug = _slug(i, question)
         md_path = outdir / f"{slug}.md"
         html_path = outdir / f"{slug}.html"
@@ -109,6 +284,19 @@ def main() -> int:
         entries.append({"question": question, "md": md_path.name, "html": html_path.name})
 
     index_lines = ["# Hotel Truth Pack v1", "", "Deterministic Electra + HotelRunner mock report pack.", ""]
+    if index_notes:
+        index_lines.append("## Inbox Notes")
+        for note in index_notes:
+            index_lines.append(f"- {note}")
+        if fallback_reason:
+            index_lines.append(f"- Inbox fallback reason: {fallback_reason}")
+        index_lines.append("")
+    if skipped_questions:
+        index_lines.append("## Skipped Questions")
+        for skipped in skipped_questions:
+            years_str = _format_years(list(skipped["required_years"]))
+            index_lines.append(f"- Skipped: {skipped['question']} (requires years: {years_str})")
+        index_lines.append("")
     for idx, entry in enumerate(entries, start=1):
         index_lines.append(f"## Q{idx}")
         index_lines.append(f"- question: {entry['question']}")

@@ -30,10 +30,19 @@ def test_dev_scripts_exist_and_are_executable() -> None:
     repo_root = _repo_root()
     dev_check = repo_root / "scripts" / "dev_check.sh"
     dev_run_all = repo_root / "scripts" / "dev_run_all.sh"
+    run_inbox_truth_pack = repo_root / "scripts" / "run_inbox_truth_pack.sh"
+    run_inbox_truth_pack_partial = repo_root / "scripts" / "run_inbox_truth_pack_partial.sh"
+    inbox_ls = repo_root / "scripts" / "inbox_ls.py"
     assert dev_check.exists()
     assert dev_run_all.exists()
+    assert run_inbox_truth_pack.exists()
+    assert run_inbox_truth_pack_partial.exists()
+    assert inbox_ls.exists()
     assert os.access(dev_check, os.X_OK)
     assert os.access(dev_run_all, os.X_OK)
+    assert os.access(run_inbox_truth_pack, os.X_OK)
+    assert os.access(run_inbox_truth_pack_partial, os.X_OK)
+    assert os.access(inbox_ls, os.X_OK)
 
 
 def test_dev_check_passes_from_repo_root() -> None:

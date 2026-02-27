@@ -1,0 +1,67 @@
+{
+  "agency_rules": [
+    {
+      "source_system": "hotelrunner",
+      "field": "agency_name",
+      "op": "contains",
+      "value": "direct",
+      "canon_agency_id": "DIRECT",
+      "canon_agency_name": "Direct Channel",
+      "reason": "rule:contains:direct"
+    },
+    {
+      "source_system": "hotelrunner",
+      "field": "channel",
+      "op": "contains",
+      "value": "direct",
+      "canon_agency_id": "DIRECT",
+      "canon_agency_name": "Direct Channel",
+      "reason": "rule:contains:direct"
+    },
+    {
+      "source_system": "hotelrunner",
+      "field": "channel",
+      "op": "regex",
+      "value": "booking\\.com",
+      "canon_agency_id": "AG001",
+      "canon_agency_name": "Atlas Partners",
+      "reason": "rule:regex:booking.com"
+    },
+    {
+      "source_system": "hotelrunner",
+      "field": "channel",
+      "op": "regex",
+      "value": "expedia",
+      "canon_agency_id": "AG002",
+      "canon_agency_name": "Beacon Agency",
+      "reason": "rule:regex:expedia"
+    },
+    {
+      "source_system": "hotelrunner",
+      "field": "channel",
+      "op": "regex",
+      "value": "agoda",
+      "canon_agency_id": "AG003",
+      "canon_agency_name": "Cedar Travel",
+      "reason": "rule:regex:agoda"
+    },
+    {
+      "source_system": "hotelrunner",
+      "field": "channel",
+      "op": "regex",
+      "value": "hotelbeds",
+      "canon_agency_id": "AG004",
+      "canon_agency_name": "Drift Voyages",
+      "reason": "rule:regex:hotelbeds"
+    },
+    {
+      "source_system": "hotelrunner",
+      "field": "channel",
+      "op": "regex",
+      "value": "wholesaler",
+      "canon_agency_id": "AG005",
+      "canon_agency_name": "Elm Holidays",
+      "reason": "rule:regex:wholesaler"
+    }
+  ]
+}

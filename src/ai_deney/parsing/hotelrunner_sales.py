@@ -20,6 +20,7 @@ NORMALIZED_COLUMNS = [
 _REQUIRED_BASE_COLUMNS = {"date", "gross_sales", "net_sales", "currency"}
 _ID_COLUMNS = ("booking_id", "invoice_id")
 _CHANNEL_COLUMNS = ("channel", "agency")
+_AGENCY_DIM_COLUMNS = ("agency_id", "agency_name")
 
 _CHANNEL_TO_AGENCY: dict[str, tuple[str, str]] = {
     "direct": ("DIRECT", "Direct Channel"),
@@ -79,19 +80,33 @@ def _resolve_agency(row: dict, channel: str) -> tuple[str, str]:
     return agency_id, agency_name
 
 
+def _pick_channel_or_agency_dim(row: dict) -> str:
+    channel = _safe_str(row.get("channel")) or _safe_str(row.get("agency"))
+    if channel:
+        return channel
+    agency_name = _safe_str(row.get("agency_name"))
+    if agency_name:
+        return agency_name
+    agency_id = _safe_str(row.get("agency_id"))
+    if agency_id:
+        return agency_id
+    raise ValueError("missing required channel dimension (expected channel|agency or agency_id+agency_name)")
+
+
 def _validate_required_input_columns(fieldnames: list[str] | None) -> None:
     names = {str(n).strip() for n in (fieldnames or []) if n is not None}
     missing = sorted(c for c in _REQUIRED_BASE_COLUMNS if c not in names)
     has_id = any(c in names for c in _ID_COLUMNS)
     has_channel = any(c in names for c in _CHANNEL_COLUMNS)
-    if missing or (not has_id) or (not has_channel):
+    has_agency_dim = all(c in names for c in _AGENCY_DIM_COLUMNS)
+    if missing or (not has_id) or (not (has_channel or has_agency_dim)):
         missing_parts: list[str] = []
         if missing:
             missing_parts.append(", ".join(missing))
         if not has_id:
             missing_parts.append("booking_id|invoice_id")
-        if not has_channel:
-            missing_parts.append("channel|agency")
+        if not (has_channel or has_agency_dim):
+            missing_parts.append("channel|agency or agency_id+agency_name")
         raise ValueError(f"required columns missing: {', '.join(missing_parts)}")
 
 
@@ -104,7 +119,7 @@ def parse_daily_sales_csv(path: Path) -> list[dict]:
         for row in reader:
             date = str(row["date"]).strip()
             year = int(date.split("-", 1)[0])
-            channel = _pick_column(row, _CHANNEL_COLUMNS, "channel")
+            channel = _pick_channel_or_agency_dim(row)
             agency_id, agency_name = _resolve_agency(row, channel=channel)
             rows.append(
                 {

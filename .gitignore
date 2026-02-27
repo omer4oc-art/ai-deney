@@ -78,7 +78,11 @@ docs/*
 !docs/DEBUGGING.md
 !docs/RELEASING.md
 !docs/schema_electra_sales.md
+!docs/INBOX_WORKFLOW.md
 outputs/
+
+# inbox drop-folder payloads (never commit real exports)
+data/inbox/**
 
 # local runner
 actions-runner/

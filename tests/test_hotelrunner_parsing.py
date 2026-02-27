@@ -54,6 +54,22 @@ def test_hotelrunner_parser_rejects_missing_required_columns(tmp_path: Path) -> 
         parse_daily_sales_csv(bad_csv)
 
 
+def test_hotelrunner_parser_accepts_agency_dimension_without_channel(tmp_path: Path) -> None:
+    csv_path = tmp_path / "agency_dim.csv"
+    csv_path.write_text(
+        (
+            "date,booking_id,agency_id,agency_name,gross_sales,net_sales,currency\n"
+            "2025-01-01,HR1,AG900,Agency Nine,10.00,9.10,USD\n"
+        ),
+        encoding="utf-8",
+    )
+    rows = parse_daily_sales_csv(csv_path)
+    assert len(rows) == 1
+    assert rows[0]["agency_id"] == "AG900"
+    assert rows[0]["agency_name"] == "Agency Nine"
+    assert rows[0]["channel"] == "Agency Nine"
+
+
 def test_hotelrunner_parser_rejects_negative_gross(tmp_path: Path) -> None:
     bad_csv = tmp_path / "negative.csv"
     bad_csv.write_text(

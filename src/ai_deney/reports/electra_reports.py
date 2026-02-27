@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from html import escape
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from ai_deney.analytics.electra_queries import (
 )
 from ai_deney.connectors.electra_mock import ElectraMockConnector
 from ai_deney.intent.electra_intent import parse_electra_query
-from ai_deney.parsing.electra_sales import normalize_report_files
+from ai_deney.parsing.electra_sales import TOTAL_AGENCY_ID, normalize_report_files
 from ai_deney.reports.registry import ReportRegistry
 
 _DETERMINISTIC_SOURCE_FOOTER = "Source: Electra mock fixtures; Generated: deterministic run."
@@ -30,6 +31,36 @@ def _default_normalized_root() -> Path:
 
 def _default_raw_root() -> Path:
     return _repo_root() / "data" / "raw" / "electra_mock"
+
+
+def _electra_year_data_flags(year: int, normalized_root: Path) -> tuple[bool, bool]:
+    """
+    Return ``(has_summary_rows, has_agency_rows)`` for one normalized year file.
+    """
+    path = normalized_root / f"electra_sales_{int(year)}.csv"
+    if not path.exists():
+        return False, False
+
+    has_summary = False
+    has_agency = False
+    with path.open("r", encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            agency_id = str(row.get("agency_id") or "").strip()
+            if agency_id == TOTAL_AGENCY_ID:
+                has_summary = True
+            elif agency_id:
+                has_agency = True
+            if has_summary and has_agency:
+                break
+    return has_summary, has_agency
+
+
+def _needs_summary_data(reports: list[str]) -> bool:
+    return bool(set(reports) & {"sales_summary", "sales_by_month"})
+
+
+def _needs_agency_data(reports: list[str]) -> bool:
+    return bool(set(reports) & {"sales_by_agency", "top_agencies", "direct_share"})
 
 
 def _df_records(df) -> list[dict]:
@@ -57,12 +88,25 @@ def ensure_normalized_data(
         except Exception as exc:
             raise ValueError(f"path escapes repo root: {path}") from exc
 
+    years_i = sorted({int(y) for y in years})
+    need_summary = _needs_summary_data(reports)
+    need_agency = _needs_agency_data(reports)
+    missing_summary_years: list[int] = []
+    missing_agency_years: list[int] = []
+    if need_summary or need_agency:
+        for year in years_i:
+            has_summary, has_agency = _electra_year_data_flags(year, normalized)
+            if need_summary and not has_summary:
+                missing_summary_years.append(year)
+            if need_agency and not has_agency:
+                missing_agency_years.append(year)
+
     conn = ElectraMockConnector(repo_root=repo, raw_root=raw)
-    if "sales_summary" in reports:
-        summary_paths = conn.fetch_report("sales_summary", {"years": years})
+    if missing_summary_years:
+        summary_paths = conn.fetch_report("sales_summary", {"years": missing_summary_years})
         normalize_report_files(summary_paths, report_type="sales_summary", output_root=normalized)
-    if "sales_by_agency" in reports:
-        agency_paths = conn.fetch_report("sales_by_agency", {"years": years})
+    if missing_agency_years:
+        agency_paths = conn.fetch_report("sales_by_agency", {"years": missing_agency_years})
         normalize_report_files(agency_paths, report_type="sales_by_agency", output_root=normalized)
 
 
