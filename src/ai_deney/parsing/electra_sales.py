@@ -6,6 +6,8 @@ import csv
 import re
 from pathlib import Path
 
+from ai_deney.adapters.electra_adapter import parse_electra_export
+
 NORMALIZED_COLUMNS = [
     "date",
     "year",
@@ -27,44 +29,40 @@ _PDF_ROW_RE = re.compile(
 def parse_sales_summary_csv(path: Path) -> list[dict]:
     """Parse ``sales_summary_<year>.csv`` fixture rows."""
     rows: list[dict] = []
-    with path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            date = row["date"].strip()
-            year = int(date.split("-", 1)[0])
-            rows.append(
-                {
-                    "date": date,
-                    "year": year,
-                    "agency_id": TOTAL_AGENCY_ID,
-                    "agency_name": TOTAL_AGENCY_NAME,
-                    "gross_sales": float(row["gross_sales"]),
-                    "net_sales": float(row.get("net_sales", "") or 0.0),
-                    "currency": (row.get("currency") or "USD").strip() or "USD",
-                }
-            )
+    for row in parse_electra_export(path, report_type="sales_summary"):
+        date = row["date"].strip()
+        year = int(date.split("-", 1)[0])
+        rows.append(
+            {
+                "date": date,
+                "year": year,
+                "agency_id": TOTAL_AGENCY_ID,
+                "agency_name": TOTAL_AGENCY_NAME,
+                "gross_sales": float(row["gross_sales"]),
+                "net_sales": float(row.get("net_sales", "") or 0.0),
+                "currency": (row.get("currency") or "USD").strip() or "USD",
+            }
+        )
     return rows
 
 
 def parse_sales_by_agency_csv(path: Path) -> list[dict]:
     """Parse ``sales_by_agency_<year>.csv`` fixture rows."""
     rows: list[dict] = []
-    with path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            date = row["date"].strip()
-            year = int(date.split("-", 1)[0])
-            rows.append(
-                {
-                    "date": date,
-                    "year": year,
-                    "agency_id": row["agency_id"].strip(),
-                    "agency_name": row["agency_name"].strip(),
-                    "gross_sales": float(row["gross_sales"]),
-                    "net_sales": float(row.get("net_sales", "") or 0.0),
-                    "currency": (row.get("currency") or "USD").strip() or "USD",
-                }
-            )
+    for row in parse_electra_export(path, report_type="sales_by_agency"):
+        date = row["date"].strip()
+        year = int(date.split("-", 1)[0])
+        rows.append(
+            {
+                "date": date,
+                "year": year,
+                "agency_id": row["agency_id"].strip(),
+                "agency_name": row["agency_name"].strip(),
+                "gross_sales": float(row["gross_sales"]),
+                "net_sales": float(row.get("net_sales", "") or 0.0),
+                "currency": (row.get("currency") or "USD").strip() or "USD",
+            }
+        )
     return rows
 
 
@@ -94,7 +92,7 @@ def parse_sales_summary_pdf(path: Path) -> list[dict]:
 def parse_report_file(path: Path, report_type: str) -> list[dict]:
     """Parse a single report file to normalized records."""
     suffix = path.suffix.lower()
-    if suffix == ".csv":
+    if suffix in {".csv", ".xlsx", ".xlsm"}:
         if report_type == "sales_summary":
             return parse_sales_summary_csv(path)
         if report_type == "sales_by_agency":
@@ -174,4 +172,3 @@ def normalize_report_files(report_paths: list[Path], report_type: str, output_ro
     for path in report_paths:
         records.extend(parse_report_file(path, report_type=report_type))
     return write_normalized_yearly(records, output_root=output_root)
-

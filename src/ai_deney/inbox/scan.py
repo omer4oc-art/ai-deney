@@ -15,8 +15,8 @@ REQUIRED_REPORT_KEYS = (
     ("hotelrunner", "daily_sales"),
 )
 
-_ELECTRA_RE = re.compile(r"^electra_(sales_summary|sales_by_agency)_(\d{4}-\d{2}-\d{2})\.csv$")
-_HOTELRUNNER_RE = re.compile(r"^hotelrunner_daily_sales_(\d{4}-\d{2}-\d{2})\.csv$")
+_ELECTRA_RE = re.compile(r"^electra_(sales_summary|sales_by_agency)_(\d{4}-\d{2}-\d{2})\.(csv|xlsx|xlsm)$")
+_HOTELRUNNER_RE = re.compile(r"^hotelrunner_daily_sales_(\d{4}-\d{2}-\d{2})\.(csv|xlsx|xlsm)$")
 
 
 class InboxScanError(ValueError):
@@ -80,7 +80,8 @@ def _parse_candidate_filename(source: str, filename: str) -> tuple[str, date]:
         if not m:
             raise InboxScanError(
                 "invalid inbox filename for electra: "
-                f"{filename}; expected electra_<report>_<YYYY-MM-DD>.csv where report in {list(ELECTRA_REPORT_TYPES)}"
+                f"{filename}; expected electra_<report>_<YYYY-MM-DD>.<csv|xlsx|xlsm> "
+                f"where report in {list(ELECTRA_REPORT_TYPES)}"
             )
         report_type = m.group(1)
         report_date = _parse_date(m.group(2), filename)
@@ -91,7 +92,7 @@ def _parse_candidate_filename(source: str, filename: str) -> tuple[str, date]:
         if not m:
             raise InboxScanError(
                 "invalid inbox filename for hotelrunner: "
-                f"{filename}; expected hotelrunner_daily_sales_<YYYY-MM-DD>.csv"
+                f"{filename}; expected hotelrunner_daily_sales_<YYYY-MM-DD>.<csv|xlsx|xlsm>"
             )
         report_date = _parse_date(m.group(1), filename)
         return "daily_sales", report_date

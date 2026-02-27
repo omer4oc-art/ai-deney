@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+from ai_deney.adapters.hotelrunner_adapter import parse_hotelrunner_export
+
 NORMALIZED_COLUMNS = [
     "date",
     "year",
@@ -17,10 +19,7 @@ NORMALIZED_COLUMNS = [
     "currency",
 ]
 
-_REQUIRED_BASE_COLUMNS = {"date", "gross_sales", "net_sales", "currency"}
 _ID_COLUMNS = ("booking_id", "invoice_id")
-_CHANNEL_COLUMNS = ("channel", "agency")
-_AGENCY_DIM_COLUMNS = ("agency_id", "agency_name")
 
 _CHANNEL_TO_AGENCY: dict[str, tuple[str, str]] = {
     "direct": ("DIRECT", "Direct Channel"),
@@ -93,47 +92,27 @@ def _pick_channel_or_agency_dim(row: dict) -> str:
     raise ValueError("missing required channel dimension (expected channel|agency or agency_id+agency_name)")
 
 
-def _validate_required_input_columns(fieldnames: list[str] | None) -> None:
-    names = {str(n).strip() for n in (fieldnames or []) if n is not None}
-    missing = sorted(c for c in _REQUIRED_BASE_COLUMNS if c not in names)
-    has_id = any(c in names for c in _ID_COLUMNS)
-    has_channel = any(c in names for c in _CHANNEL_COLUMNS)
-    has_agency_dim = all(c in names for c in _AGENCY_DIM_COLUMNS)
-    if missing or (not has_id) or (not (has_channel or has_agency_dim)):
-        missing_parts: list[str] = []
-        if missing:
-            missing_parts.append(", ".join(missing))
-        if not has_id:
-            missing_parts.append("booking_id|invoice_id")
-        if not (has_channel or has_agency_dim):
-            missing_parts.append("channel|agency or agency_id+agency_name")
-        raise ValueError(f"required columns missing: {', '.join(missing_parts)}")
-
-
 def parse_daily_sales_csv(path: Path) -> list[dict]:
     """Parse ``daily_sales_<year>.csv`` fixture rows."""
     rows: list[dict] = []
-    with path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        _validate_required_input_columns(reader.fieldnames)
-        for row in reader:
-            date = str(row["date"]).strip()
-            year = int(date.split("-", 1)[0])
-            channel = _pick_channel_or_agency_dim(row)
-            agency_id, agency_name = _resolve_agency(row, channel=channel)
-            rows.append(
-                {
-                    "date": date,
-                    "year": year,
-                    "booking_id": _pick_column(row, _ID_COLUMNS, "id"),
-                    "agency_id": agency_id,
-                    "agency_name": agency_name,
-                    "channel": channel,
-                    "gross_sales": float(row["gross_sales"]),
-                    "net_sales": float(row["net_sales"]),
-                    "currency": (row.get("currency") or "USD").strip() or "USD",
-                }
-            )
+    for row in parse_hotelrunner_export(path):
+        date = str(row["date"]).strip()
+        year = int(date.split("-", 1)[0])
+        channel = _pick_channel_or_agency_dim(row)
+        agency_id, agency_name = _resolve_agency(row, channel=channel)
+        rows.append(
+            {
+                "date": date,
+                "year": year,
+                "booking_id": _pick_column(row, _ID_COLUMNS, "id"),
+                "agency_id": agency_id,
+                "agency_name": agency_name,
+                "channel": channel,
+                "gross_sales": float(row["gross_sales"]),
+                "net_sales": float(row.get("net_sales", "") or 0.0),
+                "currency": (row.get("currency") or "USD").strip() or "USD",
+            }
+        )
     validate_no_negative_gross_sales(rows)
     return rows
 
@@ -226,7 +205,5 @@ def normalize_report_files(report_paths: list[Path], output_root: Path) -> list[
     """Parse one HotelRunner report batch and write normalized yearly CSV files."""
     records: list[dict] = []
     for path in report_paths:
-        if path.suffix.lower() != ".csv":
-            raise ValueError(f"unsupported report file: {path}")
         records.extend(parse_daily_sales_csv(path))
     return write_normalized_yearly(records, output_root=output_root)
