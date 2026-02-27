@@ -25,6 +25,12 @@ QUESTIONS = [
     "where do electra and hotelrunner differ in 2026",
     "electra vs hotelrunner monthly reconciliation for 2025",
     "electra vs hotelrunner monthly reconciliation for 2026",
+    "where do electra and hotelrunner differ by agency in 2025",
+    "where do electra and hotelrunner differ by agency in 2026",
+    "monthly reconciliation by agency 2025 electra hotelrunner",
+    "monthly reconciliation by agency 2026 electra hotelrunner",
+    "any anomalies by agency in 2025",
+    "any anomalies by agency in 2026",
 ]
 
 

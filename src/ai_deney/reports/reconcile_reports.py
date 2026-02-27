@@ -68,8 +68,10 @@ def ensure_normalized_data(
         _assert_within_repo(path, repo)
 
     electra_conn = ElectraMockConnector(repo_root=repo, raw_root=raw_electra)
-    electra_paths = electra_conn.fetch_report("sales_summary", {"years": years})
-    normalize_electra_report_files(electra_paths, report_type="sales_summary", output_root=normalized)
+    electra_summary_paths = electra_conn.fetch_report("sales_summary", {"years": years})
+    normalize_electra_report_files(electra_summary_paths, report_type="sales_summary", output_root=normalized)
+    electra_agency_paths = electra_conn.fetch_report("sales_by_agency", {"years": years})
+    normalize_electra_report_files(electra_agency_paths, report_type="sales_by_agency", output_root=normalized)
 
     hotelrunner_conn = HotelRunnerMockConnector(repo_root=repo, raw_root=raw_hotelrunner)
     hotelrunner_paths = hotelrunner_conn.fetch_report("daily_sales", {"years": years})
@@ -347,7 +349,17 @@ def _build_registry(normalized_root: Path | None = None) -> ReportRegistry:
 
 
 def answer_from_spec(spec: QuerySpec, normalized_root: Path | None = None, output_format: str = "markdown") -> str:
-    if spec.source != "reconcile" or spec.analysis not in {"reconcile_daily", "reconcile_monthly"}:
+    if spec.source != "reconcile":
+        raise ValueError("spec is not a reconciliation query")
+    if spec.analysis in {
+        "reconcile_daily_by_agency",
+        "reconcile_monthly_by_agency",
+        "reconcile_anomalies_agency",
+    }:
+        from ai_deney.reports.reconcile_dim_reports import answer_from_spec as answer_dim_from_spec
+
+        return answer_dim_from_spec(spec, normalized_root=normalized_root, output_format=output_format)
+    if spec.analysis not in {"reconcile_daily", "reconcile_monthly"}:
         raise ValueError("spec is not a reconciliation query")
     ensure_normalized_data(spec.years, normalized_root=normalized_root)
     registry = _build_registry(normalized_root=normalized_root)

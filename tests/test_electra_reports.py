@@ -218,3 +218,43 @@ def test_answer_question_supports_monthly_reconciliation_report() -> None:
     assert "# Electra vs HotelRunner Monthly Reconciliation (2025)" in text
     assert "| year | month | electra_gross | hr_gross | delta | status |" in text
     assert "Data freshness / source: Source: Electra + HotelRunner mock fixtures; Generated: deterministic run." in text
+
+
+def test_answer_question_supports_daily_reconciliation_by_agency_report() -> None:
+    tmp_root = _repo_tmp_dir("reconcile_daily_by_agency")
+    normalized_root = tmp_root / "normalized"
+    text = answer_question(
+        "where do electra and hotelrunner differ by agency in 2025",
+        normalized_root=normalized_root,
+    )
+    assert "# Electra vs HotelRunner Daily Reconciliation by Agency (2025)" in text
+    assert "## Top mismatch contributors" in text
+    assert "## Top anomalies" in text
+    assert "| date | year | dim_value | electra_gross | hr_gross | delta | status | reason_code |" in text
+
+
+def test_answer_question_supports_monthly_reconciliation_by_agency_report_html() -> None:
+    tmp_root = _repo_tmp_dir("reconcile_monthly_by_agency")
+    normalized_root = tmp_root / "normalized"
+    html = answer_question(
+        "monthly reconciliation by agency 2026 electra hotelrunner",
+        normalized_root=normalized_root,
+        output_format="html",
+    )
+    assert "<!doctype html>" in html.lower()
+    assert "<h2>Top mismatch contributors</h2>" in html
+    assert "<h2>Top anomalies</h2>" in html
+    assert "Electra vs HotelRunner Monthly Reconciliation by Agency (2026)" in html
+
+
+def test_answer_question_supports_anomalies_by_agency_report() -> None:
+    tmp_root = _repo_tmp_dir("reconcile_anomalies_by_agency")
+    normalized_root = tmp_root / "normalized"
+    text = answer_question(
+        "any anomalies by agency in 2026",
+        normalized_root=normalized_root,
+    )
+    assert "# Electra vs HotelRunner Agency Anomalies (2026)" in text
+    assert "## Top mismatch contributors" in text
+    assert "## Top anomalies" in text
+    assert "NEW_DIM_VALUE" in text

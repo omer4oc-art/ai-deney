@@ -82,3 +82,28 @@ def test_parse_reconciliation_monthly_patterns() -> None:
     assert spec2.analysis == "reconcile_monthly"
     assert spec2.registry_key == "reconcile.monthly"
     assert spec2.years == [2026]
+
+
+def test_parse_reconciliation_by_agency_patterns() -> None:
+    spec = parse_electra_query("where do electra and hotelrunner differ by agency in 2025")
+    assert spec.source == "reconcile"
+    assert spec.analysis == "reconcile_daily_by_agency"
+    assert spec.group_by == "agency"
+    assert spec.registry_key == "reconcile.daily_by_agency"
+    assert spec.years == [2025]
+
+    spec2 = parse_electra_query("monthly reconciliation by agency 2026 electra hotelrunner")
+    assert spec2.source == "reconcile"
+    assert spec2.analysis == "reconcile_monthly_by_agency"
+    assert spec2.group_by == "agency"
+    assert spec2.registry_key == "reconcile.monthly_by_agency"
+    assert spec2.years == [2026]
+
+
+def test_parse_reconciliation_anomaly_by_agency_patterns() -> None:
+    spec = parse_electra_query("any anomalies by agency in 2025")
+    assert spec.source == "reconcile"
+    assert spec.analysis == "reconcile_anomalies_agency"
+    assert spec.group_by == "agency"
+    assert spec.registry_key == "reconcile.anomalies_agency"
+    assert spec.years == [2025]

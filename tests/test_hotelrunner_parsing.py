@@ -26,11 +26,22 @@ def test_hotelrunner_csv_parsing_and_normalization(tmp_path: Path) -> None:
             rows = list(csv.DictReader(f))
         assert len(rows) >= 30
         assert all(float(r["gross_sales"]) >= 0 for r in rows)
-        assert {"date", "year", "booking_id", "channel", "gross_sales", "net_sales", "currency"} <= set(rows[0].keys())
+        assert {
+            "date",
+            "year",
+            "booking_id",
+            "agency_id",
+            "agency_name",
+            "channel",
+            "gross_sales",
+            "net_sales",
+            "currency",
+        } <= set(rows[0].keys())
 
     parsed = parse_daily_sales_csv(paths[0])
     assert len(parsed) >= 30
     assert parsed[0]["booking_id"].startswith("HR2025")
+    assert parsed[0]["agency_id"] in {"AG001", "AG002", "AG003", "AG004", "AG005", "DIRECT"}
 
 
 def test_hotelrunner_parser_rejects_missing_required_columns(tmp_path: Path) -> None:

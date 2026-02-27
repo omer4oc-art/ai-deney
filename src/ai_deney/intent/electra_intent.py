@@ -18,6 +18,9 @@ _SUPPORTED_EXAMPLES = [
     "where do electra and hotelrunner differ in 2026",
     "electra vs hotelrunner monthly reconciliation for 2025",
     "monthly reconciliation 2026 electra hotelrunner",
+    "where do electra and hotelrunner differ by agency in 2025",
+    "monthly reconciliation by agency 2026 electra hotelrunner",
+    "any anomalies by agency in 2025",
 ]
 
 
@@ -60,12 +63,33 @@ def parse_electra_query(text: str) -> QuerySpec:
     mentions_electra = "electra" in lowered
     mentions_hotelrunner = ("hotelrunner" in lowered) or ("hotel runner" in lowered)
     asks_reconcile = ("differ" in lowered) or ("difference" in lowered) or compare or ("reconcil" in lowered)
+    asks_anomaly = "anomal" in lowered
     is_reconciliation = mentions_electra and mentions_hotelrunner and asks_reconcile
     is_monthly_reconciliation = is_reconciliation and (
         ("monthly" in lowered) or ("by month" in lowered)
     )
+    is_agency_reconciliation = is_reconciliation and has_agency
+    is_agency_monthly_reconciliation = is_agency_reconciliation and (
+        ("monthly" in lowered) or ("by month" in lowered)
+    )
+    is_agency_anomaly = asks_anomaly and has_agency
 
-    if is_monthly_reconciliation:
+    if is_agency_anomaly:
+        report = "sales_by_agency"
+        group_by = "agency"
+        analysis = "reconcile_anomalies_agency"
+        source = "reconcile"
+    elif is_agency_monthly_reconciliation:
+        report = "sales_by_agency"
+        group_by = "agency"
+        analysis = "reconcile_monthly_by_agency"
+        source = "reconcile"
+    elif is_agency_reconciliation:
+        report = "sales_by_agency"
+        group_by = "agency"
+        analysis = "reconcile_daily_by_agency"
+        source = "reconcile"
+    elif is_monthly_reconciliation:
         report = "sales_summary"
         group_by = "month"
         analysis = "reconcile_monthly"

@@ -16,6 +16,9 @@ AnalysisName = Literal[
     "direct_share",
     "reconcile_daily",
     "reconcile_monthly",
+    "reconcile_daily_by_agency",
+    "reconcile_monthly_by_agency",
+    "reconcile_anomalies_agency",
 ]
 SourceName = Literal["electra", "reconcile"]
 
@@ -44,6 +47,12 @@ class QuerySpec:
         if self.source == "reconcile":
             if self.analysis == "reconcile_monthly":
                 return "reconcile.monthly"
+            if self.analysis == "reconcile_daily_by_agency":
+                return "reconcile.daily_by_agency"
+            if self.analysis == "reconcile_monthly_by_agency":
+                return "reconcile.monthly_by_agency"
+            if self.analysis == "reconcile_anomalies_agency":
+                return "reconcile.anomalies_agency"
             return "reconcile.daily"
         key = self.analysis or self.report
         return f"electra.{key}"
