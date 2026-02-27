@@ -107,3 +107,118 @@ def get_sales_by_agency(years: list[int], normalized_root: Path | None = None):
         r["net_sales"] = round(r["net_sales"], 2)
     return _to_dataframe(out)
 
+
+def get_sales_by_month(years: list[int], normalized_root: Path | None = None):
+    """
+    Return monthly totals using summary TOTAL rows.
+    """
+    rows = _validated_rows(years, normalized_root=normalized_root)
+    summary_rows = [r for r in rows if r["agency_id"] == TOTAL_AGENCY_ID]
+    grouped: dict[tuple[int, int, str], dict] = {}
+    for row in summary_rows:
+        year = int(row["year"])
+        month = int(str(row["date"]).split("-")[1])
+        key = (year, month, row["currency"])
+        if key not in grouped:
+            grouped[key] = {
+                "year": year,
+                "month": month,
+                "gross_sales": 0.0,
+                "net_sales": 0.0,
+                "currency": row["currency"],
+            }
+        grouped[key]["gross_sales"] += float(row["gross_sales"])
+        grouped[key]["net_sales"] += float(row["net_sales"])
+    out = list(grouped.values())
+    out.sort(key=lambda r: (r["year"], r["month"]))
+    for row in out:
+        row["gross_sales"] = round(row["gross_sales"], 2)
+        row["net_sales"] = round(row["net_sales"], 2)
+    return _to_dataframe(out)
+
+
+def get_top_agencies(years: list[int], top_n: int = 5, normalized_root: Path | None = None):
+    """
+    Return top agencies by yearly gross_sales.
+    """
+    rows = _validated_rows(years, normalized_root=normalized_root)
+    agency_rows = [r for r in rows if r["agency_id"] not in {TOTAL_AGENCY_ID}]
+    grouped: dict[tuple[int, str, str, str], dict] = {}
+    for row in agency_rows:
+        key = (int(row["year"]), row["agency_id"], row["agency_name"], row["currency"])
+        if key not in grouped:
+            grouped[key] = {
+                "year": int(row["year"]),
+                "agency_id": row["agency_id"],
+                "agency_name": row["agency_name"],
+                "gross_sales": 0.0,
+                "net_sales": 0.0,
+                "currency": row["currency"],
+            }
+        grouped[key]["gross_sales"] += float(row["gross_sales"])
+        grouped[key]["net_sales"] += float(row["net_sales"])
+
+    by_year: dict[int, list[dict]] = {}
+    for row in grouped.values():
+        by_year.setdefault(int(row["year"]), []).append(row)
+
+    out: list[dict] = []
+    for year in sorted(by_year):
+        ranked = sorted(
+            by_year[year],
+            key=lambda r: (-float(r["gross_sales"]), r["agency_id"]),
+        )[: max(1, int(top_n))]
+        for idx, row in enumerate(ranked, start=1):
+            out.append(
+                {
+                    "year": year,
+                    "rank": idx,
+                    "agency_id": row["agency_id"],
+                    "agency_name": row["agency_name"],
+                    "gross_sales": round(float(row["gross_sales"]), 2),
+                    "net_sales": round(float(row["net_sales"]), 2),
+                    "currency": row["currency"],
+                }
+            )
+    return _to_dataframe(out)
+
+
+def get_direct_share(years: list[int], normalized_root: Path | None = None):
+    """
+    Return direct-vs-agencies gross share (%) by year.
+    """
+    rows = _validated_rows(years, normalized_root=normalized_root)
+    agency_rows = [r for r in rows if r["agency_id"] not in {TOTAL_AGENCY_ID}]
+    year_totals: dict[int, dict] = {}
+    for row in agency_rows:
+        year = int(row["year"])
+        if year not in year_totals:
+            year_totals[year] = {
+                "year": year,
+                "direct_gross_sales": 0.0,
+                "agency_gross_sales": 0.0,
+                "currency": row["currency"],
+            }
+        if row["agency_id"] == "DIRECT":
+            year_totals[year]["direct_gross_sales"] += float(row["gross_sales"])
+        else:
+            year_totals[year]["agency_gross_sales"] += float(row["gross_sales"])
+
+    out: list[dict] = []
+    for year in sorted(year_totals):
+        direct_gross = float(year_totals[year]["direct_gross_sales"])
+        agency_gross = float(year_totals[year]["agency_gross_sales"])
+        total = direct_gross + agency_gross
+        direct_pct = (direct_gross / total * 100.0) if total else 0.0
+        agency_pct = (agency_gross / total * 100.0) if total else 0.0
+        out.append(
+            {
+                "year": year,
+                "direct_gross_sales": round(direct_gross, 2),
+                "agency_gross_sales": round(agency_gross, 2),
+                "direct_share_pct": round(direct_pct, 2),
+                "agency_share_pct": round(agency_pct, 2),
+                "currency": year_totals[year]["currency"],
+            }
+        )
+    return _to_dataframe(out)

@@ -11,7 +11,8 @@ from pathlib import Path
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Ask Electra mock reports from plain-English questions.")
     parser.add_argument("question", nargs="+", help="Question text, e.g. 'get me the sales data of 2026 and 2025'")
-    parser.add_argument("--out", required=True, help="Output markdown path (must be inside repo root)")
+    parser.add_argument("--out", required=True, help="Output report path (must be inside repo root)")
+    parser.add_argument("--format", choices=["md", "html"], default="md", help="Output format (default: md)")
     return parser.parse_args()
 
 
@@ -34,12 +35,17 @@ def main() -> int:
 
     question = " ".join(args.question).strip()
     out_path = Path(args.out)
+    if not out_path.is_absolute():
+        out_path = repo_root / out_path
+    out_path = out_path.resolve()
 
     _assert_within_repo(out_path, repo_root)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    markdown = answer_question(question)
-    out_path.write_text(markdown, encoding="utf-8")
+    output_format = "markdown" if args.format == "md" else "html"
+    normalized_root = out_path.parent / "_normalized"
+    rendered = answer_question(question, normalized_root=normalized_root, output_format=output_format)
+    out_path.write_text(rendered, encoding="utf-8")
     print(f"WROTE: {out_path.resolve()}")
     return 0
 

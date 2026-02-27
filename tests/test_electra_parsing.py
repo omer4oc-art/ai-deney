@@ -35,7 +35,10 @@ def test_csv_parsing_and_normalization_for_both_report_types(tmp_path: Path) -> 
     parsed_summary = parse_sales_summary_csv(summary_paths[0])
     parsed_agency = parse_sales_by_agency_csv(agency_paths[0])
     assert parsed_summary[0]["agency_id"] == TOTAL_AGENCY_ID
-    assert len(parsed_agency) == 3
+    assert len(parsed_summary) >= 30
+    assert len(parsed_agency) >= 180
+    assert {r["agency_id"] for r in parsed_agency} >= {"AG001", "AG002", "AG003", "AG004", "AG005", "DIRECT"}
+    assert any(float(r["net_sales"]) < 0 for r in parsed_agency)
 
 
 def test_pdf_parsing_works_for_generated_sample(tmp_path: Path) -> None:

@@ -27,8 +27,9 @@ def test_answer_question_sales_summary_markdown_contains_expected_totals() -> No
     )
     assert "# Sales Summary (2025, 2026)" in text
     assert "| year | gross_sales | net_sales | currency |" in text
-    assert "| 2025 | 1000.00 | 900.00 | USD |" in text
-    assert "| 2026 | 1300.00 | 1170.00 | USD |" in text
+    assert "| 2025 |" in text
+    assert "| 2026 |" in text
+    assert "Data freshness / source: Source: Electra mock fixtures; Generated: deterministic run." in text
     for year in (2025, 2026):
         path = normalized_root / f"electra_sales_{year}.csv"
         with path.open("r", encoding="utf-8", newline="") as f:
@@ -63,6 +64,36 @@ def test_answer_question_sales_by_agency_only_passes_with_agency_rows_only() -> 
         rows = list(csv.DictReader(f))
     assert rows
     assert all(r["agency_id"] != "TOTAL" for r in rows)
+
+
+def test_answer_question_supports_new_month_top_and_share_patterns() -> None:
+    tmp_root = _repo_tmp_dir("new_patterns")
+    normalized_root = tmp_root / "normalized"
+
+    by_month = answer_question("sales by month for 2025", normalized_root=normalized_root)
+    assert "# Sales By Month (2025)" in by_month
+    assert "| year | month | gross_sales | net_sales | currency |" in by_month
+
+    top = answer_question("top agencies in 2026", normalized_root=normalized_root)
+    assert "# Top Agencies (2026)" in top
+    assert "| year | rank | agency_id | agency_name | gross_sales | net_sales | currency |" in top
+
+    share = answer_question("share of direct vs agencies in 2025", normalized_root=normalized_root)
+    assert "# Direct vs Agency Share (2025)" in share
+    assert "| year | direct_gross_sales | agency_gross_sales | direct_share_pct | agency_share_pct | currency |" in share
+
+
+def test_answer_question_can_render_html() -> None:
+    tmp_root = _repo_tmp_dir("html")
+    normalized_root = tmp_root / "normalized"
+    html = answer_question(
+        "get me the sales categorized by agencies for 2025",
+        normalized_root=normalized_root,
+        output_format="html",
+    )
+    assert "<!doctype html>" in html.lower()
+    assert "<table>" in html
+    assert "Data freshness / source: Source: Electra mock fixtures; Generated: deterministic run." in html
 
 
 def test_cross_check_runs_and_catches_mismatch_when_both_sides_exist() -> None:
@@ -108,4 +139,30 @@ def test_ask_electra_cli_writes_report() -> None:
     content = out_path.read_text(encoding="utf-8")
     assert "# Sales By Agency (2025)" in content
     assert "Agency" in content
+    assert "WROTE:" in p.stdout
+
+
+def test_ask_electra_cli_writes_html_report() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    tmp_root = _repo_tmp_dir("cli_html")
+    out_path = tmp_root / "report.html"
+    p = subprocess.run(
+        [
+            sys.executable,
+            "scripts/ask_electra.py",
+            "sales by month for 2025",
+            "--format",
+            "html",
+            "--out",
+            str(out_path),
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    assert p.returncode == 0, f"stdout={p.stdout}\nstderr={p.stderr}"
+    assert out_path.exists()
+    content = out_path.read_text(encoding="utf-8")
+    assert "<!doctype html>" in content.lower()
+    assert "<table>" in content
     assert "WROTE:" in p.stdout

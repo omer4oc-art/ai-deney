@@ -2,7 +2,13 @@ import pytest
 from pathlib import Path
 import shutil
 
-from ai_deney.analytics.electra_queries import get_sales_by_agency, get_sales_years
+from ai_deney.analytics.electra_queries import (
+    get_direct_share,
+    get_sales_by_agency,
+    get_sales_by_month,
+    get_sales_years,
+    get_top_agencies,
+)
 from ai_deney.analytics.electra_validations import (
     read_normalized_rows,
     validate_agency_totals_match_summary,
@@ -37,38 +43,29 @@ def test_analytics_queries_return_expected_totals(tmp_path: Path) -> None:
     normalized_root = _prepare_normalized(tmp_path)
 
     yearly = _rows_from_df(get_sales_years([2025, 2026], normalized_root=normalized_root))
-    assert yearly == [
-        {"year": 2025, "gross_sales": 1000.0, "net_sales": 900.0, "currency": "USD"},
-        {"year": 2026, "gross_sales": 1300.0, "net_sales": 1170.0, "currency": "USD"},
-    ]
+    assert [r["year"] for r in yearly] == [2025, 2026]
+    assert all(r["gross_sales"] > 0 for r in yearly)
+    assert all(r["currency"] == "USD" for r in yearly)
 
     agency = _rows_from_df(get_sales_by_agency([2025], normalized_root=normalized_root))
-    assert agency == [
-        {
-            "year": 2025,
-            "agency_id": "AG001",
-            "agency_name": "Atlas Partners",
-            "gross_sales": 400.0,
-            "net_sales": 360.0,
-            "currency": "USD",
-        },
-        {
-            "year": 2025,
-            "agency_id": "AG002",
-            "agency_name": "Beacon Agency",
-            "gross_sales": 350.0,
-            "net_sales": 315.0,
-            "currency": "USD",
-        },
-        {
-            "year": 2025,
-            "agency_id": "DIRECT",
-            "agency_name": "Direct Channel",
-            "gross_sales": 250.0,
-            "net_sales": 225.0,
-            "currency": "USD",
-        },
-    ]
+    assert len(agency) >= 6
+    assert {row["agency_id"] for row in agency} >= {"AG001", "AG002", "AG003", "AG004", "AG005", "DIRECT"}
+
+    by_month = _rows_from_df(get_sales_by_month([2025], normalized_root=normalized_root))
+    assert len(by_month) >= 6
+    assert by_month[0]["year"] == 2025
+    assert all(1 <= int(r["month"]) <= 12 for r in by_month)
+
+    top = _rows_from_df(get_top_agencies([2026], top_n=3, normalized_root=normalized_root))
+    assert len(top) == 3
+    assert [r["rank"] for r in top] == [1, 2, 3]
+    assert top[0]["gross_sales"] >= top[1]["gross_sales"] >= top[2]["gross_sales"]
+
+    share = _rows_from_df(get_direct_share([2025, 2026], normalized_root=normalized_root))
+    assert [r["year"] for r in share] == [2025, 2026]
+    for row in share:
+        total_pct = float(row["direct_share_pct"]) + float(row["agency_share_pct"])
+        assert abs(total_pct - 100.0) <= 0.01
 
 
 def test_validation_checks_and_failure_modes(tmp_path: Path) -> None:

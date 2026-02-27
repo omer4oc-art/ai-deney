@@ -6,8 +6,15 @@ from dataclasses import dataclass
 from typing import Literal
 
 ReportName = Literal["sales_summary", "sales_by_agency"]
-GroupBy = Literal["agency"]
-OutputFormat = Literal["markdown"]
+GroupBy = Literal["agency", "month"]
+OutputFormat = Literal["markdown", "html"]
+AnalysisName = Literal[
+    "sales_summary",
+    "sales_by_agency",
+    "sales_by_month",
+    "top_agencies",
+    "direct_share",
+]
 
 
 @dataclass(frozen=True)
@@ -24,9 +31,11 @@ class QuerySpec:
     group_by: GroupBy | None = None
     output_format: OutputFormat = "markdown"
     compare: bool = False
+    analysis: AnalysisName | None = None
+    top_n: int = 5
     original_text: str = ""
 
     @property
     def registry_key(self) -> str:
-        return f"electra.{self.report}"
-
+        key = self.analysis or self.report
+        return f"electra.{key}"
