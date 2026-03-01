@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -132,6 +133,10 @@ def create_app(
     app.state.static_root = static_root
     app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
 
+    src_root = root / "src"
+    if str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+
     @app.get("/health")
     def health() -> dict[str, object]:
         return {"ok": True, "service": "toy_hotel_portal"}
@@ -226,6 +231,40 @@ def create_app(
         filename = f"toy_portal_{start_day.isoformat()}_{end_day.isoformat()}.csv"
         headers = {"Content-Disposition": f"attachment; filename={filename}"}
         return Response(content=csv_text, media_type="text/csv", headers=headers)
+
+    @app.post("/api/ask")
+    async def api_ask(request: Request) -> dict[str, object]:
+        payload = await _load_payload(request)
+        question = _parse_nonempty_str(payload, "question")
+        raw_format = _parse_optional_str(payload, "format", default="md").lower() or "md"
+        if raw_format not in {"md", "html"}:
+            raise HTTPException(status_code=422, detail="format must be 'md' or 'html'")
+
+        redact_pii = _parse_int(payload, "redact_pii", default=0, min_value=0)
+        if redact_pii not in {0, 1}:
+            raise HTTPException(status_code=422, detail="redact_pii must be 0 or 1")
+
+        try:
+            from ai_deney.reports.toy_reports import answer_with_metadata
+
+            result = answer_with_metadata(
+                question,
+                db_path=app.state.db_path,
+                output_format="markdown" if raw_format == "md" else "html",
+                redact_pii=bool(redact_pii),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return {
+            "ok": True,
+            "question": question,
+            "format": raw_format,
+            "redact_pii": int(redact_pii),
+            "report": result["report"],
+            "spec": result["spec"],
+            "metadata": result["metadata"],
+        }
 
     return app
 

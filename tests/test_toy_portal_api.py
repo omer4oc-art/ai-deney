@@ -203,3 +203,43 @@ def test_seeded_hot_range_occupancy_pct_above_50(tmp_path: Path) -> None:
     assert occ.status_code == 200
     body = occ.json()
     assert float(body["occupancy_pct"]) > 50.0
+
+
+def test_ask_endpoint_returns_deterministic_sales_report(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    payload = {
+        "guest_name": "Alice A",
+        "check_in": "2025-03-05",
+        "check_out": "2025-03-07",
+        "room_type": "Deluxe",
+        "adults": 2,
+        "children": 0,
+        "source_channel": "booking",
+        "nightly_rate": 120.00,
+        "total_paid": 240.00,
+        "currency": "USD",
+    }
+    assert client.post("/api/checkin", json=payload).status_code == 200
+    payload["guest_name"] = "Bob B"
+    payload["check_in"] = "2025-03-18"
+    payload["check_out"] = "2025-03-19"
+    payload["source_channel"] = "direct"
+    payload["total_paid"] = 150.00
+    assert client.post("/api/checkin", json=payload).status_code == 200
+
+    ask_res = client.post(
+        "/api/ask",
+        json={
+            "question": "sales by source channel for March 2025",
+            "format": "md",
+            "redact_pii": 1,
+        },
+    )
+    assert ask_res.status_code == 200
+    body = ask_res.json()
+    assert body["ok"] is True
+    assert body["format"] == "md"
+    assert body["spec"]["query_type"] == "sales_month"
+    assert body["spec"]["group_by"] == "source_channel"
+    assert "| source_channel | reservations | total_sales |" in body["report"]
+    assert "total_sales: 390.00" in body["report"]

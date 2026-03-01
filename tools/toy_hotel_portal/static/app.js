@@ -269,9 +269,38 @@
     setText("departures-value", departures);
   }
 
+  async function submitAsk() {
+    var askInput = byId("ask-input");
+    var askOutput = byId("ask-output");
+    var askFormat = byId("ask-format");
+    var askRedact = byId("ask-redact");
+    if (!askInput || !askOutput) {
+      return;
+    }
+
+    var question = String(askInput.value || "").trim();
+    if (!question) {
+      askOutput.textContent = "Question is required.";
+      return;
+    }
+
+    var format = askFormat ? String(askFormat.value || "md") : "md";
+    var redactValue = askRedact && askRedact.checked ? 1 : 0;
+    askOutput.textContent = "Running...";
+    var response = await fetchJson("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: question, format: format, redact_pii: redactValue }),
+    });
+    askOutput.textContent = String(response.report || "");
+  }
+
   function initDashboard() {
     var refreshBtn = byId("refresh-btn");
     var exportBtn = byId("export-btn");
+    var askBtn = byId("ask-submit");
+    var askInput = byId("ask-input");
+    var askOutput = byId("ask-output");
     if (!refreshBtn || !exportBtn || !byId("occupancy-chart")) {
       return;
     }
@@ -290,6 +319,22 @@
         alert("Export failed: " + err.message);
       });
     });
+
+    if (askBtn && askInput && askOutput) {
+      askBtn.addEventListener("click", function () {
+        submitAsk().catch(function (err) {
+          askOutput.textContent = "Ask failed: " + err.message;
+        });
+      });
+      askInput.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          submitAsk().catch(function (err) {
+            askOutput.textContent = "Ask failed: " + err.message;
+          });
+        }
+      });
+    }
 
     // Smoke check: Open http://127.0.0.1:8011/?debug=1 and verify bars render.
     refreshDashboard().catch(function (err) {

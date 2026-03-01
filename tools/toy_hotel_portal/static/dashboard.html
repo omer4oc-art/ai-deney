@@ -146,6 +146,28 @@
 </template>
 </div>
 </div>
+<div class="bg-white dark:bg-slate-800 p-6 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+<div class="flex items-center justify-between gap-3">
+<div>
+<h3 class="text-lg font-bold">Ask Alice</h3>
+<p class="text-sm text-slate-500 dark:text-slate-400">Ask deterministic sales questions (no LLM).</p>
+</div>
+<span class="px-2 py-1 bg-slate-100 dark:bg-slate-700 text-[10px] font-mono text-slate-500 dark:text-slate-400 rounded">POST /api/ask</span>
+</div>
+<div class="flex flex-col md:flex-row gap-3">
+<input class="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm" id="ask-input" placeholder="march 2025 sales data" type="text" value="march 2025 sales data"/>
+<select class="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm" id="ask-format">
+<option value="md">Markdown</option>
+<option value="html">HTML</option>
+</select>
+<label class="inline-flex items-center gap-2 px-2 text-xs text-slate-600 dark:text-slate-300">
+<input id="ask-redact" type="checkbox"/>
+<span>Redact</span>
+</label>
+<button class="px-4 py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition-colors" id="ask-submit" type="button">Ask</button>
+</div>
+<pre class="min-h-[120px] max-h-[280px] overflow-auto rounded-lg bg-slate-900 text-slate-100 text-xs p-3 whitespace-pre-wrap" id="ask-output">Ask a question and click Ask.</pre>
+</div>
 <div class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
 <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700 flex justify-between items-center">
 <div>

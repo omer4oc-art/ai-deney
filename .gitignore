@@ -84,6 +84,7 @@ docs/*
 !docs/ELECTRA_TEST_PORTAL.md
 !docs/PORTAL_E2E.md
 !docs/VIEWER_UI.md
+!docs/TOY_PORTAL_AGENT.md
 outputs/
 
 # inbox drop-folder payloads (never commit real exports)
