@@ -31,6 +31,7 @@ def test_dashboard_contains_ask_panel_controls(tmp_path: Path) -> None:
         "ask-format",
         "ask-submit",
         "ask-download",
+        "ask-download-json",
         "ask-trace-toggle",
         "ask-trace",
         "ask-warnings",
@@ -38,6 +39,11 @@ def test_dashboard_contains_ask_panel_controls(tmp_path: Path) -> None:
         "ask-spans-count",
         "ask-output",
         "ask-html-preview",
+        "ask-delta-card",
+        "ask-delta-total",
+        "ask-delta-pct",
+        "ask-max-span",
+        "ask-min-span",
     ]:
         assert f'id="{element_id}"' in html
 
@@ -531,6 +537,14 @@ def test_ask_sales_multi_span_iso_query_includes_spans_count_totals_and_deltas(t
     assert body["meta"]["spans_count"] == 2
     assert body["meta"]["compare"] is True
     assert [row["total_sales"] for row in body["meta"]["totals"]] == [200.0, 150.0]
+    assert set(body["meta"]["deltas"].keys()) >= {
+        "delta_total_sales",
+        "pct_change_total_sales",
+        "max_span_label",
+        "max_span_total_sales",
+        "min_span_label",
+        "min_span_total_sales",
+    }
     assert body["meta"]["deltas"]["delta_total_sales"] == -50.0
     assert body["meta"]["deltas"]["pct_change_total_sales"] == -25.0
     assert "2025-03-01" in body["output"]
@@ -585,6 +599,54 @@ def test_ask_multi_span_smoke_default_and_debug_trace(tmp_path: Path) -> None:
     assert "trace" in debug_body
     serialized_trace = json.dumps(debug_body["trace"], sort_keys=True).lower()
     assert "guest_name" not in serialized_trace
+
+
+def test_ask_multi_span_spec_compare_equals_meta_compare(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    for guest_name, check_in, total_paid in [
+        ("Parity Guest 1", "2025-03-01", 140.0),
+        ("Parity Guest 2", "2025-06-03", 260.0),
+    ]:
+        assert (
+            client.post(
+                "/api/checkin",
+                json={
+                    "guest_name": guest_name,
+                    "check_in": check_in,
+                    "check_out": "2025-06-04" if check_in == "2025-06-03" else "2025-03-02",
+                    "room_type": "Standard",
+                    "adults": 1,
+                    "children": 0,
+                    "source_channel": "direct",
+                    "nightly_rate": total_paid,
+                    "total_paid": total_paid,
+                    "currency": "USD",
+                },
+            ).status_code
+            == 200
+        )
+
+    body = client.post(
+        "/api/ask",
+        json={
+            "question": "Total sales on March 1st 2025 and June 3rd 2025",
+            "format": "md",
+            "redact_pii": True,
+        },
+    ).json()
+    assert body["spec"]["compare"] == body["meta"]["compare"]
+    assert body["spec"]["compare"] is True
+    assert body["meta"]["spans_count"] == 2
+
+    debug_body = client.post(
+        "/api/ask?debug=1",
+        json={
+            "question": "Total sales on March 1st 2025 and June 3rd 2025",
+            "format": "md",
+            "redact_pii": True,
+        },
+    ).json()
+    assert debug_body["spec"]["compare"] == debug_body["meta"]["compare"] == True
 
 
 def test_ask_sales_for_dates_compare_includes_delta_line(tmp_path: Path) -> None:
@@ -664,6 +726,40 @@ def test_ask_sales_for_dates_missing_year_adds_warning(tmp_path: Path) -> None:
     assert "plan" not in body
     assert body["meta"]["warnings"]
     assert any("defaulted to 2025" in str(w) for w in body["meta"]["warnings"])
+
+
+def test_ask_sales_single_span_query_compare_false_and_no_delta_payload(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    assert (
+        client.post(
+            "/api/checkin",
+            json={
+                "guest_name": "Single Span Guest",
+                "check_in": "2025-03-01",
+                "check_out": "2025-03-02",
+                "room_type": "Standard",
+                "adults": 1,
+                "children": 0,
+                "source_channel": "direct",
+                "nightly_rate": 100.0,
+                "total_paid": 100.0,
+                "currency": "USD",
+            },
+        ).status_code
+        == 200
+    )
+
+    ask_res = client.post(
+        "/api/ask",
+        json={"question": "Total sales on March 1st 2025", "format": "md", "redact_pii": True},
+    )
+    assert ask_res.status_code == 200
+    body = ask_res.json()
+    assert len(body["spec"]["spans"]) == 0
+    assert body["spec"]["compare"] is False
+    assert body["meta"]["compare"] is False
+    assert body["meta"]["spans_count"] in (None, 1)
+    assert not body["meta"].get("deltas")
 
 
 def test_ask_sales_for_dates_same_request_same_output_hash(tmp_path: Path) -> None:

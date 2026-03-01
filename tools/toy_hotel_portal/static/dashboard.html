@@ -167,6 +167,7 @@
 </label>
 <button class="px-4 py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition-colors" id="ask-submit" type="button">Ask</button>
 <button class="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-sm font-semibold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors disabled:opacity-50" disabled="" id="ask-download" type="button">Download</button>
+<button class="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-sm font-semibold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors disabled:opacity-50" disabled="" id="ask-download-json" type="button">Download JSON</button>
 </div>
 <p class="text-xs text-slate-500 dark:text-slate-400" id="ask-status">Ready.</p>
 <div class="hidden rounded-lg border border-amber-300 bg-amber-100 text-amber-900 text-xs px-3 py-2 whitespace-pre-wrap" id="ask-warnings"></div>
@@ -176,6 +177,13 @@
 <div class="min-h-[120px] max-h-[360px] overflow-auto rounded-lg bg-slate-900 text-slate-100 text-xs p-3" id="ask-output">
 <pre class="whitespace-pre-wrap" id="ask-output-text">Ask a question and click Ask.</pre>
 <iframe class="hidden w-full min-h-[300px] rounded bg-white" id="ask-html-preview" sandbox="allow-same-origin"></iframe>
+</div>
+<div class="hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-3 text-xs space-y-1" id="ask-delta-card">
+<div class="font-semibold text-slate-700 dark:text-slate-200">Delta</div>
+<div class="text-slate-600 dark:text-slate-300" id="ask-delta-total">delta_total_sales: -</div>
+<div class="text-slate-600 dark:text-slate-300" id="ask-delta-pct">pct_change_total_sales: -</div>
+<div class="text-slate-600 dark:text-slate-300" id="ask-max-span">max_span: -</div>
+<div class="text-slate-600 dark:text-slate-300" id="ask-min-span">min_span: -</div>
 </div>
 <div class="hidden space-y-2" id="ask-trace-panel">
 <button class="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-semibold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors" id="ask-trace-toggle" type="button">Show Trace</button>

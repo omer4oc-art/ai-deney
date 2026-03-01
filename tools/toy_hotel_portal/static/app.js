@@ -7,6 +7,7 @@
   var lastAskFormat = "md";
   var lastAskContentType = "text/markdown";
   var lastAskQuestion = "";
+  var lastAskResponse = null;
   var askTraceExpanded = false;
 
   function byId(id) {
@@ -275,12 +276,16 @@
   function setAskBusy(isBusy) {
     var askSubmit = byId("ask-submit");
     var askDownload = byId("ask-download");
+    var askDownloadJson = byId("ask-download-json");
     if (askSubmit) {
       askSubmit.disabled = Boolean(isBusy);
       askSubmit.textContent = isBusy ? "Running... ⏳" : "Ask";
     }
     if (askDownload) {
       askDownload.disabled = Boolean(isBusy) || !lastAskOutput;
+    }
+    if (askDownloadJson) {
+      askDownloadJson.disabled = Boolean(isBusy) || !lastAskResponse;
     }
   }
 
@@ -321,6 +326,134 @@
 
   function buildAskFilename(question, ext) {
     return "ask_" + slugifyText(question) + "_" + hashText(question) + "." + ext;
+  }
+
+  function buildAskJsonTimestamp() {
+    var now = new Date();
+    var year = String(now.getFullYear());
+    var month = String(now.getMonth() + 1).padStart(2, "0");
+    var day = String(now.getDate()).padStart(2, "0");
+    var hours = String(now.getHours()).padStart(2, "0");
+    var minutes = String(now.getMinutes()).padStart(2, "0");
+    var seconds = String(now.getSeconds()).padStart(2, "0");
+    return year + month + day + "_" + hours + minutes + seconds;
+  }
+
+  function toFiniteNumber(value) {
+    var n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function formatMoney(value) {
+    var n = toFiniteNumber(value);
+    return n == null ? "n/a" : n.toFixed(2);
+  }
+
+  function formatPercent(value) {
+    var n = toFiniteNumber(value);
+    return n == null ? "n/a" : n.toFixed(2) + "%";
+  }
+
+  function renderAskDelta(spec, meta) {
+    var card = byId("ask-delta-card");
+    var deltaTotalEl = byId("ask-delta-total");
+    var deltaPctEl = byId("ask-delta-pct");
+    var maxSpanEl = byId("ask-max-span");
+    var minSpanEl = byId("ask-min-span");
+    if (!card || !deltaTotalEl || !deltaPctEl || !maxSpanEl || !minSpanEl) {
+      return;
+    }
+
+    var deltas = meta && meta.deltas && typeof meta.deltas === "object" ? meta.deltas : {};
+    var spans = spec && Array.isArray(spec.spans) ? spec.spans : [];
+    var totals = meta && Array.isArray(meta.totals) ? meta.totals : [];
+    var hasDeltas = Object.keys(deltas).length > 0;
+    var isMultiSpan = spans.length >= 2;
+    if (!hasDeltas && !isMultiSpan) {
+      card.classList.add("hidden");
+      deltaTotalEl.textContent = "delta_total_sales: -";
+      deltaPctEl.textContent = "pct_change_total_sales: -";
+      maxSpanEl.textContent = "max_span: -";
+      minSpanEl.textContent = "min_span: -";
+      return;
+    }
+
+    var deltaTotalSales = deltas.delta_total_sales;
+    var pctChangeTotalSales = deltas.pct_change_total_sales;
+    var maxSpanLabel = deltas.max_span_label;
+    var maxSpanTotalSales = deltas.max_span_total_sales;
+    var minSpanLabel = deltas.min_span_label;
+    var minSpanTotalSales = deltas.min_span_total_sales;
+
+    if (totals.length >= 2) {
+      var first = totals[0] || {};
+      var last = totals[totals.length - 1] || {};
+      var firstSales = toFiniteNumber(first.total_sales);
+      var lastSales = toFiniteNumber(last.total_sales);
+      if (deltaTotalSales == null && firstSales != null && lastSales != null) {
+        deltaTotalSales = Number((lastSales - firstSales).toFixed(2));
+      }
+      if (pctChangeTotalSales == null && firstSales != null && lastSales != null && firstSales !== 0) {
+        pctChangeTotalSales = Number((((lastSales - firstSales) / firstSales) * 100).toFixed(2));
+      }
+      if (maxSpanLabel == null || maxSpanTotalSales == null || minSpanLabel == null || minSpanTotalSales == null) {
+        var validTotals = totals
+          .map(function (row) {
+            var sales = toFiniteNumber(row && row.total_sales);
+            return sales == null ? null : { label: String((row && row.label) || ""), total_sales: sales };
+          })
+          .filter(function (row) { return row != null; });
+        if (validTotals.length) {
+          validTotals.sort(function (a, b) {
+            if (a.total_sales === b.total_sales) {
+              return a.label < b.label ? -1 : (a.label > b.label ? 1 : 0);
+            }
+            return a.total_sales - b.total_sales;
+          });
+          var minRow = validTotals[0];
+          var maxRow = validTotals[validTotals.length - 1];
+          if (maxSpanLabel == null) {
+            maxSpanLabel = maxRow.label;
+          }
+          if (maxSpanTotalSales == null) {
+            maxSpanTotalSales = maxRow.total_sales;
+          }
+          if (minSpanLabel == null) {
+            minSpanLabel = minRow.label;
+          }
+          if (minSpanTotalSales == null) {
+            minSpanTotalSales = minRow.total_sales;
+          }
+        }
+      }
+    }
+
+    var pctSuffix = "";
+    if (pctChangeTotalSales == null && deltas.pct_change_note) {
+      pctSuffix = " (" + String(deltas.pct_change_note) + ")";
+    }
+    deltaTotalEl.textContent = "delta_total_sales: " + formatMoney(deltaTotalSales);
+    deltaPctEl.textContent = "pct_change_total_sales: " + formatPercent(pctChangeTotalSales) + pctSuffix;
+    maxSpanEl.textContent = "max_span: " + String(maxSpanLabel || "n/a") + " (" + formatMoney(maxSpanTotalSales) + ")";
+    minSpanEl.textContent = "min_span: " + String(minSpanLabel || "n/a") + " (" + formatMoney(minSpanTotalSales) + ")";
+    card.classList.remove("hidden");
+  }
+
+  function downloadAskJson() {
+    if (!lastAskResponse) {
+      return;
+    }
+    var filename = "ask_alice_" + buildAskJsonTimestamp() + ".json";
+    var payload = JSON.stringify(lastAskResponse, null, 2);
+    var blob = new Blob([payload], { type: "application/json" });
+    var downloadUrl = window.URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(downloadUrl);
   }
 
   function renderAskMeta(spec, meta) {
@@ -469,14 +602,18 @@
       lastAskOutput = output;
       lastAskFormat = format;
       lastAskContentType = contentType;
+      lastAskResponse = response;
       renderAskOutput(output, format, contentType);
       renderAskMeta(response.spec || {}, response.meta || {});
+      renderAskDelta(response.spec || {}, response.meta || {});
       renderAskWarnings((response.meta || {}).warnings || []);
       renderAskTrace(response.trace || null);
       setAskStatus("Done.");
     } catch (err) {
       lastAskOutput = "";
+      lastAskResponse = null;
       renderAskMeta({}, {});
+      renderAskDelta({}, {});
       renderAskWarnings([]);
       renderAskTrace(null);
       renderAskOutput("Ask failed: " + err.message, "md", "text/markdown");
@@ -492,6 +629,7 @@
     var exportBtn = byId("export-btn");
     var askBtn = byId("ask-submit");
     var askDownload = byId("ask-download");
+    var askDownloadJson = byId("ask-download-json");
     var askInput = byId("ask-input");
     var askOutput = byId("ask-output");
     if (!refreshBtn || !exportBtn || !byId("occupancy-chart")) {
@@ -531,6 +669,11 @@
     if (askDownload) {
       askDownload.addEventListener("click", function () {
         downloadAskOutput();
+      });
+    }
+    if (askDownloadJson) {
+      askDownloadJson.addEventListener("click", function () {
+        downloadAskJson();
       });
     }
     initAskTracePanel();

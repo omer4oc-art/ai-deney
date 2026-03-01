@@ -781,8 +781,15 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
     if spans_list and dates_list:
         raise ValueError("spans and dates cannot be used together")
 
-    if spans_list and len(spans_list) >= 2 and not compare_provided:
+    # Normalize compare deterministically from parsed cardinality.
+    # Multi-span or multi-date queries are always comparisons.
+    # Single-span/date queries stay non-compare unless compare was explicitly provided.
+    if len(spans_list) >= 2 or len(dates_list) >= 2:
         compare = True
+    elif compare_provided:
+        compare = bool(compare_raw)
+    else:
+        compare = False
 
     if report_type == "sales_for_dates":
         if spans_list:

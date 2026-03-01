@@ -122,6 +122,16 @@ def test_parse_multi_span_sales_days_from_month_day_prompt() -> None:
     assert [span.end_date for span in spec.spans] == ["2025-03-01", "2025-06-03"]
 
 
+def test_parse_with_trace_multi_span_sales_days_sets_compare_true() -> None:
+    parsed = parse_toy_query_with_trace(
+        "Total sales on March 1st 2025 and June 3rd 2025",
+        intent_mode="deterministic",
+    )
+    assert parsed.spec.report_type == "sales_day"
+    assert parsed.spec.compare is True
+    assert [span.start_date for span in parsed.spec.spans] == ["2025-03-01", "2025-06-03"]
+
+
 def test_parse_multi_span_sales_month_compare_prompt() -> None:
     spec = parse_toy_query("compare March 2025 vs June 2025 sales", intent_mode="deterministic")
     assert spec.report_type == "sales_month"
