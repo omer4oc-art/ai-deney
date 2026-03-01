@@ -61,7 +61,9 @@ Usage:
 - Choose `md` or `html`.
 - Keep **Redact** on by default unless you need raw names.
 - Click **Ask** to call `POST /api/ask`.
+- Click **Save Run** to call `POST /api/ask/save` and persist an audit trail folder under `outputs/_ask_runs/`.
 - Click **Download** to save the returned output as `.md` or `.html`.
+- Use **Recent Ask Runs** to open saved `index.md` files or compare a saved run with the current output.
 
 ### Debug Trace (Developer Only)
 
@@ -92,6 +94,59 @@ The API returns deterministic report output with:
 - `meta` (execution metadata)
 - `output` (rendered markdown/html string)
 - `content_type` (`text/markdown` or `text/html`)
+
+## Ask Runs Audit Trail
+
+Each saved Ask run is persisted to:
+
+`outputs/_ask_runs/<run_id>/`
+
+where:
+- `run_id` format: `YYYY-MM-DD_HHMMSS_<shortslug>_<hash8>`
+- `<shortslug>` is derived from the question
+- `<hash8>` is stable for identical request payloads (`question`, `format`, `redact_pii`, `debug`)
+
+Saved files:
+- `request.json` (question/format/redact_pii/debug)
+- `response.json` (`ok/spec/meta/content_type` + `trace` only when debug is enabled)
+- `output.md` or `output.html` (rendered output)
+- `index.md` (human-readable summary + links)
+
+### UI Save + Browse
+
+- Save a run: `POST /api/ask/save`
+- List latest runs: `GET /api/ask/runs?limit=20`
+- Open run page: `GET /ask-run/{run_id}`
+- Open raw run file: `GET /ask-run/{run_id}/index.md` (or `request.json`, `response.json`, `output.md|output.html`)
+
+### Compare Runs
+
+Use:
+
+`GET /api/ask/compare?run_a=<id>&run_b=<id>&format=md|html`
+
+Returns deterministic unified diff text (`diff`) and redacts `guest_name`-like fields when either run has `redact_pii=true`.
+
+### CLI Save Runs
+
+`scripts/ask_alice.py` supports:
+
+```bash
+python3 scripts/ask_alice.py "sales by channel for March 2025" \
+  --db data/toy_portal/toy.db \
+  --out outputs/_ask/march_channel.md \
+  --save-run 1
+```
+
+This writes normal `--out` output and also persists the same ask-run folder format under `outputs/_ask_runs`.
+
+### Determinism + Redaction Guarantees
+
+- Run hash suffix (`hash8`) is deterministic for the same request payload.
+- Compare diffs are deterministic for the same pair/order of runs.
+- Trace is only persisted when debug is enabled.
+- Trace is sanitized to exclude `guest_name` and row-level raw payload keys.
+- All ask-run paths are constrained under repo root.
 
 ## E2E UI Lane (Playwright)
 

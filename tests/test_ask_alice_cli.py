@@ -164,3 +164,49 @@ def test_ask_alice_cli_replays_parse_transcript(tmp_path: Path) -> None:
     assert "INTENT_MODE: replay" in p.stdout
     text = out_path.read_text(encoding="utf-8")
     assert "total_sales: 200.00" in text
+
+
+def test_ask_alice_cli_save_run_writes_artifacts(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "toy.db"
+    out_path = repo_root / "tests" / "_tmp_tasks" / "ask_alice_cli" / "saved_run_report.md"
+    _seed_cli_db(db_path)
+
+    p = subprocess.run(
+        [
+            sys.executable,
+            "scripts/ask_alice.py",
+            "sales by channel for March 2025",
+            "--db",
+            str(db_path),
+            "--out",
+            str(out_path),
+            "--save-run",
+            "1",
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    assert p.returncode == 0, f"stdout={p.stdout}\nstderr={p.stderr}"
+    assert "RUN_ID:" in p.stdout
+    run_id = ""
+    for line in p.stdout.splitlines():
+        if line.startswith("RUN_ID: "):
+            run_id = line.split("RUN_ID: ", 1)[1].strip()
+            break
+    assert run_id
+
+    run_dir = repo_root / "outputs" / "_ask_runs" / run_id
+    assert run_dir.exists()
+    assert (run_dir / "request.json").exists()
+    assert (run_dir / "response.json").exists()
+    assert (run_dir / "output.md").exists()
+    assert (run_dir / "index.md").exists()
+
+    req = json.loads((run_dir / "request.json").read_text(encoding="utf-8"))
+    resp = json.loads((run_dir / "response.json").read_text(encoding="utf-8"))
+    assert req["question"] == "sales by channel for March 2025"
+    assert req["format"] == "md"
+    assert req["debug"] is False
+    assert "trace" not in resp

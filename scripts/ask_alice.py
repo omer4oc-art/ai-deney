@@ -17,6 +17,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--db", default=None, help="Optional path to toy portal SQLite db")
     parser.add_argument("--redact-pii", action="store_true", help="Force redact_pii=true when executing the query")
     parser.add_argument(
+        "--save-run",
+        nargs="?",
+        const=1,
+        default=0,
+        type=int,
+        choices=[0, 1],
+        help="Persist ask run artifacts under outputs/_ask_runs (default: 0)",
+    )
+    parser.add_argument(
         "--record-transcript",
         default="",
         help="Optional output path for parse transcript JSON (question/raw_llm_json/validated_query_spec)",
@@ -82,6 +91,7 @@ def main() -> int:
         sys.path.insert(0, str(src_root))
 
     from ai_deney.intent.toy_intent import parse_toy_query_with_trace, resolve_intent_mode
+    from ai_deney.ask_runs import build_request_payload, save_ask_run
     from ai_deney.reports.toy_reports import answer_ask_from_spec
 
     question = " ".join(args.question).strip()
@@ -129,6 +139,29 @@ def main() -> int:
         _write_record_transcript(record_path, question, raw_llm_json, spec)
 
     out_path.write_text(str(result["output"]), encoding="utf-8")
+
+    if int(args.save_run) == 1:
+        request_payload = build_request_payload(
+            question=question,
+            ask_format=ask_format,
+            redact_pii=bool(args.redact_pii),
+            debug=False,
+        )
+        response_payload = {
+            "ok": True,
+            "spec": result.get("spec"),
+            "meta": result.get("meta"),
+            "content_type": result.get("content_type"),
+        }
+        saved = save_ask_run(
+            repo_root=repo_root,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            output_text=str(result["output"]),
+        )
+        print(f"RUN_ID: {saved['run_id']}")
+        print(f"RUN_DIR: {saved['run_dir']}")
+
     print(f"WROTE: {out_path}")
     print(f"INTENT_MODE: {intent_mode}")
     print(f"REPORT_TYPE: {result['meta']['report_type']}")
