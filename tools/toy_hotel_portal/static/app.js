@@ -1,16 +1,21 @@
 (function () {
   "use strict";
 
-  var debugMode = new URLSearchParams(window.location.search).get("debug") === "1";
+  var hasDom = typeof window !== "undefined" && typeof document !== "undefined";
+  var debugMode = hasDom ? new URLSearchParams(window.location.search).get("debug") === "1" : false;
   var warnedEmptyOccupancy = false;
   var lastAskOutput = "";
   var lastAskFormat = "md";
   var lastAskContentType = "text/markdown";
   var lastAskQuestion = "";
   var lastAskResponse = null;
+  var lastAskRunId = "";
   var askTraceExpanded = false;
 
   function byId(id) {
+    if (!hasDom) {
+      return null;
+    }
     return document.getElementById(id);
   }
 
@@ -275,11 +280,16 @@
 
   function setAskBusy(isBusy) {
     var askSubmit = byId("ask-submit");
+    var askSave = byId("ask-save");
     var askDownload = byId("ask-download");
     var askDownloadJson = byId("ask-download-json");
     if (askSubmit) {
       askSubmit.disabled = Boolean(isBusy);
       askSubmit.textContent = isBusy ? "Running... ⏳" : "Ask";
+    }
+    if (askSave) {
+      var req = currentAskRequest();
+      askSave.disabled = Boolean(isBusy) || !req.question;
     }
     if (askDownload) {
       askDownload.disabled = Boolean(isBusy) || !lastAskOutput;
@@ -322,6 +332,22 @@
       return "ask";
     }
     return s.slice(0, 40);
+  }
+
+  function buildAskRunShortSlug(question) {
+    return slugifyText(question).slice(0, 32);
+  }
+
+  function buildAskRunHash8(payload) {
+    var normalized = {
+      question: String((payload && payload.question) || "").trim(),
+      format: String((payload && payload.format) || "md") === "html" ? "html" : "md",
+      redact_pii: Boolean(payload && payload.redact_pii),
+      debug: Boolean(payload && payload.debug),
+    };
+    var encoded = JSON.stringify(normalized);
+    var full = hashText(encoded);
+    return full.padStart(8, "0").slice(-8);
   }
 
   function buildAskFilename(question, ext) {
@@ -541,6 +567,197 @@
     });
   }
 
+  function hideAskSaveBanner() {
+    var banner = byId("ask-save-banner");
+    if (!banner) {
+      return;
+    }
+    banner.classList.add("hidden");
+  }
+
+  function showAskSaveBanner(runId, indexUrl) {
+    var banner = byId("ask-save-banner");
+    var runIdEl = byId("ask-save-run-id");
+    var link = byId("ask-save-link");
+    if (!banner || !runIdEl || !link) {
+      return;
+    }
+    runIdEl.textContent = "Saved run: " + String(runId || "");
+    link.href = indexUrl || "#";
+    banner.classList.remove("hidden");
+  }
+
+  function currentAskRequest() {
+    var askInput = byId("ask-input");
+    var askFormat = byId("ask-format");
+    var askRedact = byId("ask-redact");
+    return {
+      question: String((askInput && askInput.value) || "").trim(),
+      format: askFormat ? String(askFormat.value || "md") : "md",
+      redact_pii: Boolean(askRedact && askRedact.checked),
+    };
+  }
+
+  function renderRecentAskRuns(rows) {
+    var list = byId("ask-runs-list");
+    var empty = byId("ask-runs-empty");
+    if (!list || !empty) {
+      return;
+    }
+    list.innerHTML = "";
+    var runs = Array.isArray(rows) ? rows : [];
+    if (!runs.length) {
+      empty.classList.remove("hidden");
+      empty.textContent = "No saved runs yet.";
+      return;
+    }
+    empty.classList.add("hidden");
+    runs.forEach(function (run, idx) {
+      var row = document.createElement("div");
+      row.className = "rounded border border-slate-200 dark:border-slate-700 px-3 py-2 space-y-1";
+
+      var top = document.createElement("div");
+      top.className = "flex items-center justify-between gap-2";
+
+      var left = document.createElement("div");
+      left.className = "text-[11px] text-slate-700 dark:text-slate-200 font-semibold";
+      left.textContent = String((run && run.run_id) || "");
+      top.appendChild(left);
+
+      var created = document.createElement("div");
+      created.className = "text-[11px] text-slate-500 dark:text-slate-400";
+      created.textContent = String((run && run.created_at) || "");
+      top.appendChild(created);
+      row.appendChild(top);
+
+      var snippet = document.createElement("div");
+      snippet.className = "text-[11px] text-slate-600 dark:text-slate-300";
+      snippet.textContent = String((run && run.question_snippet) || (run && run.question) || "");
+      row.appendChild(snippet);
+
+      var actions = document.createElement("div");
+      actions.className = "flex items-center gap-2";
+      var openBtn = document.createElement("button");
+      openBtn.id = "run-open-" + String(idx);
+      openBtn.type = "button";
+      openBtn.className = "px-2.5 py-1 rounded bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-[11px] font-semibold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors";
+      openBtn.textContent = "Open";
+      openBtn.addEventListener("click", function () {
+        var url = String((run && run.index_url) || ("/ask-run/" + String((run && run.run_id) || "") + "/index.md"));
+        window.open(url, "_blank", "noopener");
+      });
+      actions.appendChild(openBtn);
+
+      var compareBtn = document.createElement("button");
+      compareBtn.id = "run-compare-" + String(idx);
+      compareBtn.type = "button";
+      compareBtn.className = "px-2.5 py-1 rounded bg-sky-700 text-white text-[11px] font-semibold hover:bg-sky-800 transition-colors";
+      compareBtn.textContent = "Compare";
+      compareBtn.addEventListener("click", function () {
+        compareSavedRunWithCurrent(String((run && run.run_id) || "")).catch(function () {
+          setAskStatus("Compare failed.");
+        });
+      });
+      actions.appendChild(compareBtn);
+      row.appendChild(actions);
+
+      list.appendChild(row);
+    });
+  }
+
+  async function refreshRecentAskRuns() {
+    var payload = await fetchJson("/api/ask/runs?limit=20");
+    renderRecentAskRuns(payload.runs || []);
+  }
+
+  async function saveAskRun(options) {
+    var opts = options || {};
+    var quiet = Boolean(opts.quiet);
+    var req = currentAskRequest();
+    if (!req.question) {
+      setAskStatus("Question is required.");
+      throw new Error("question is required");
+    }
+    if (!quiet) {
+      setAskBusy(true);
+      setAskStatus("Saving run...");
+    }
+    try {
+      var saveUrl = debugMode ? "/api/ask/save?debug=1" : "/api/ask/save";
+      var saved = await fetchJson(saveUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      });
+      var response = saved.response || {};
+      var output = String(response.output || "");
+      var contentType = String(response.content_type || (req.format === "html" ? "text/html" : "text/markdown"));
+      lastAskQuestion = req.question;
+      lastAskOutput = output;
+      lastAskFormat = req.format;
+      lastAskContentType = contentType;
+      lastAskResponse = response;
+      lastAskRunId = String(saved.run_id || "");
+      renderAskOutput(output, req.format, contentType);
+      renderAskMeta(response.spec || {}, response.meta || {});
+      renderAskDelta(response.spec || {}, response.meta || {});
+      renderAskWarnings((response.meta || {}).warnings || []);
+      renderAskTrace(response.trace || null);
+      showAskSaveBanner(lastAskRunId, ((saved.files || {}).index_url) || ("/ask-run/" + lastAskRunId + "/index.md"));
+      await refreshRecentAskRuns();
+      if (!quiet) {
+        setAskStatus("Saved run: " + lastAskRunId);
+      }
+      return saved;
+    } finally {
+      if (!quiet) {
+        setAskBusy(false);
+      }
+    }
+  }
+
+  async function compareSavedRunWithCurrent(runId) {
+    if (!runId) {
+      setAskStatus("Invalid run ID.");
+      return;
+    }
+    var req = currentAskRequest();
+    if (!req.question && !lastAskQuestion) {
+      setAskStatus("Run Ask first, then compare.");
+      return;
+    }
+    setAskBusy(true);
+    setAskStatus("Saving current output for compare...");
+    try {
+      var currentSaved = await saveAskRun({ quiet: true });
+      var runB = String((currentSaved && currentSaved.run_id) || lastAskRunId || "");
+      var compareFormat = req.format === "html" ? "html" : "md";
+      var url =
+        "/api/ask/compare?run_a=" +
+        encodeURIComponent(runId) +
+        "&run_b=" +
+        encodeURIComponent(runB) +
+        "&format=" +
+        encodeURIComponent(compareFormat);
+      var compared = await fetchJson(url);
+      var diff = String(compared.diff || "");
+      if (!diff) {
+        diff = "(no diff)";
+      }
+      lastAskOutput = diff;
+      lastAskFormat = "md";
+      lastAskContentType = "text/plain";
+      renderAskOutput(diff, "md", "text/markdown");
+      renderAskMeta({}, {});
+      renderAskDelta({}, {});
+      renderAskWarnings([]);
+      renderAskTrace(null);
+      setAskStatus("Compared " + String(compared.run_a || runId) + " vs " + String(compared.run_b || runB) + ".");
+    } finally {
+      setAskBusy(false);
+    }
+  }
+
   async function refreshDashboard() {
     var startInput = byId("start-date");
     var endInput = byId("end-date");
@@ -588,6 +805,7 @@
     var format = askFormat ? String(askFormat.value || "md") : "md";
     var redactValue = Boolean(askRedact && askRedact.checked);
     lastAskQuestion = question;
+    hideAskSaveBanner();
     setAskBusy(true);
     setAskStatus("Running...");
     try {
@@ -628,8 +846,10 @@
     var refreshBtn = byId("refresh-btn");
     var exportBtn = byId("export-btn");
     var askBtn = byId("ask-submit");
+    var askSave = byId("ask-save");
     var askDownload = byId("ask-download");
     var askDownloadJson = byId("ask-download-json");
+    var askRunsRefresh = byId("ask-runs-refresh");
     var askInput = byId("ask-input");
     var askOutput = byId("ask-output");
     if (!refreshBtn || !exportBtn || !byId("occupancy-chart")) {
@@ -665,6 +885,16 @@
           });
         }
       });
+      askInput.addEventListener("input", function () {
+        setAskBusy(false);
+      });
+    }
+    if (askSave) {
+      askSave.addEventListener("click", function () {
+        saveAskRun({ quiet: false }).catch(function (err) {
+          setAskStatus("Save run failed.");
+        });
+      });
     }
     if (askDownload) {
       askDownload.addEventListener("click", function () {
@@ -676,7 +906,19 @@
         downloadAskJson();
       });
     }
+    if (askRunsRefresh) {
+      askRunsRefresh.addEventListener("click", function () {
+        refreshRecentAskRuns().catch(function (err) {
+          setAskStatus("Recent runs refresh failed.");
+        });
+      });
+    }
     initAskTracePanel();
+    hideAskSaveBanner();
+    setAskBusy(false);
+    refreshRecentAskRuns().catch(function () {
+      setAskStatus("Recent runs unavailable.");
+    });
 
     // Smoke check: Open http://127.0.0.1:8011/?debug=1 and verify bars render.
     refreshDashboard().catch(function (err) {
@@ -753,6 +995,22 @@
       return;
     }
     form.addEventListener("submit", submitCheckin);
+  }
+
+  var askHelpers = {
+    hashText: hashText,
+    slugifyText: slugifyText,
+    buildAskRunShortSlug: buildAskRunShortSlug,
+    buildAskRunHash8: buildAskRunHash8,
+  };
+  if (typeof globalThis !== "undefined") {
+    globalThis.__ASK_HELPERS__ = askHelpers;
+  }
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = askHelpers;
+  }
+  if (!hasDom) {
+    return;
   }
 
   wireNav();

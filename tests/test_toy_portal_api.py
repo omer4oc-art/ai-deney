@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from ai_deney.ask_runs import build_request_payload, save_ask_run
 from ai_deney.reports.toy_reports import answer_with_metadata
 from tools.toy_hotel_portal.app import create_app
 
@@ -30,8 +31,12 @@ def test_dashboard_contains_ask_panel_controls(tmp_path: Path) -> None:
         "ask-redact",
         "ask-format",
         "ask-submit",
+        "ask-save",
         "ask-download",
         "ask-download-json",
+        "ask-save-banner",
+        "ask-save-run-id",
+        "ask-save-link",
         "ask-trace-toggle",
         "ask-trace",
         "ask-warnings",
@@ -44,6 +49,10 @@ def test_dashboard_contains_ask_panel_controls(tmp_path: Path) -> None:
         "ask-delta-pct",
         "ask-max-span",
         "ask-min-span",
+        "ask-runs-panel",
+        "ask-runs-refresh",
+        "ask-runs-empty",
+        "ask-runs-list",
     ]:
         assert f'id="{element_id}"' in html
 
@@ -799,3 +808,131 @@ def test_ask_sales_for_dates_same_request_same_output_hash(tmp_path: Path) -> No
     first_hash = hashlib.sha256(first.json()["output"].encode("utf-8")).hexdigest()
     second_hash = hashlib.sha256(second.json()["output"].encode("utf-8")).hexdigest()
     assert first_hash == second_hash
+
+
+def test_ask_save_creates_expected_artifacts_without_trace_by_default(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    res = client.post(
+        "/api/ask/save",
+        json={"question": "Sales by channel for March 2025", "format": "md", "redact_pii": True},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert "run_id" in body and body["run_id"]
+    run_dir = tmp_path / body["run_dir"]
+    assert run_dir.exists()
+    assert (run_dir / "request.json").exists()
+    assert (run_dir / "response.json").exists()
+    assert (run_dir / "output.md").exists()
+    assert (run_dir / "index.md").exists()
+
+    request_payload = json.loads((run_dir / "request.json").read_text(encoding="utf-8"))
+    response_payload = json.loads((run_dir / "response.json").read_text(encoding="utf-8"))
+    output_text = (run_dir / "output.md").read_text(encoding="utf-8")
+    assert request_payload == {
+        "question": "Sales by channel for March 2025",
+        "format": "md",
+        "redact_pii": True,
+        "debug": False,
+    }
+    assert "trace" not in response_payload
+    assert "trace" not in json.dumps(response_payload).lower()
+    assert output_text == str(body["response"]["output"])
+    assert "guest_name" not in output_text.lower()
+
+
+def test_ask_save_identical_payloads_keep_same_hash8_suffix_and_output(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    req = {"question": "Sales by channel for March 2025", "format": "md", "redact_pii": True}
+    first = client.post("/api/ask/save", json=req)
+    second = client.post("/api/ask/save", json=req)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_body = first.json()
+    second_body = second.json()
+    assert first_body["run_id"].split("_")[-1] == second_body["run_id"].split("_")[-1]
+    assert first_body["response"]["output"] == second_body["response"]["output"]
+
+    first_run_dir = tmp_path / first_body["run_dir"]
+    second_run_dir = tmp_path / second_body["run_dir"]
+    first_output = (first_run_dir / "output.md").read_text(encoding="utf-8")
+    second_output = (second_run_dir / "output.md").read_text(encoding="utf-8")
+    assert first_output == second_output
+
+
+def test_ask_save_debug_writes_trace_without_guest_name(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    res = client.post(
+        "/api/ask/save?debug=1",
+        json={"question": "Sales by channel for March 2025", "format": "md", "redact_pii": True},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    run_dir = tmp_path / body["run_dir"]
+    response_payload = json.loads((run_dir / "response.json").read_text(encoding="utf-8"))
+    assert "trace" in response_payload
+    trace_json = json.dumps(response_payload["trace"], sort_keys=True).lower()
+    assert "guest_name" not in trace_json
+
+
+def test_ask_runs_lists_latest_saved_runs(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    for question in ["Sales by channel for March 2025", "Sales for March 2025"]:
+        res = client.post("/api/ask/save", json={"question": question, "format": "md", "redact_pii": True})
+        assert res.status_code == 200
+
+    listed = client.get("/api/ask/runs", params={"limit": 20})
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["ok"] is True
+    assert len(body["runs"]) >= 2
+    first = body["runs"][0]
+    assert "run_id" in first
+    assert "question_snippet" in first
+    assert "created_at" in first
+    assert "index_url" in first
+
+
+def test_ask_compare_is_stable_and_redacts_guest_name_when_either_run_is_redacted(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    repo_root = tmp_path.resolve()
+    run_a = save_ask_run(
+        repo_root=repo_root,
+        request_payload=build_request_payload(
+            question="manual run a",
+            ask_format="md",
+            redact_pii=False,
+            debug=False,
+        ),
+        response_payload={"ok": True, "spec": {}, "meta": {"report_type": "manual"}, "content_type": "text/markdown"},
+        output_text="guest_name: Alice A\nvalue: 1\n",
+    )
+    run_b = save_ask_run(
+        repo_root=repo_root,
+        request_payload=build_request_payload(
+            question="manual run b",
+            ask_format="md",
+            redact_pii=True,
+            debug=False,
+        ),
+        response_payload={"ok": True, "spec": {}, "meta": {"report_type": "manual"}, "content_type": "text/markdown"},
+        output_text="guest_name: Bob B\nvalue: 2\n",
+    )
+    first = client.get(
+        "/api/ask/compare",
+        params={"run_a": run_a["run_id"], "run_b": run_b["run_id"], "format": "md"},
+    )
+    second = client.get(
+        "/api/ask/compare",
+        params={"run_a": run_a["run_id"], "run_b": run_b["run_id"], "format": "md"},
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_body = first.json()
+    second_body = second.json()
+    assert first_body["diff"] == second_body["diff"]
+    assert first_body["diff"].startswith("--- ")
+    assert "Alice A" not in first_body["diff"]
+    assert "Bob B" not in first_body["diff"]
+    assert "guest_name: REDACTED" in first_body["diff"]

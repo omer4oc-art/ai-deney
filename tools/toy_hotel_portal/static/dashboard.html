@@ -166,10 +166,15 @@
 <span>Redact</span>
 </label>
 <button class="px-4 py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition-colors" id="ask-submit" type="button">Ask</button>
+<button class="px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition-colors disabled:opacity-50" disabled="" id="ask-save" type="button">Save Run</button>
 <button class="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-sm font-semibold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors disabled:opacity-50" disabled="" id="ask-download" type="button">Download</button>
 <button class="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-sm font-semibold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors disabled:opacity-50" disabled="" id="ask-download-json" type="button">Download JSON</button>
 </div>
 <p class="text-xs text-slate-500 dark:text-slate-400" id="ask-status">Ready.</p>
+<div class="hidden rounded-lg border border-emerald-300 bg-emerald-100 text-emerald-900 text-xs px-3 py-2 whitespace-pre-wrap" id="ask-save-banner">
+<span id="ask-save-run-id"></span>
+<a class="underline font-semibold ml-2" href="#" id="ask-save-link" rel="noopener" target="_blank">Open index.md</a>
+</div>
 <div class="hidden rounded-lg border border-amber-300 bg-amber-100 text-amber-900 text-xs px-3 py-2 whitespace-pre-wrap" id="ask-warnings"></div>
 <div class="text-xs text-slate-500 dark:text-slate-400 whitespace-pre-wrap" id="ask-meta"></div>
 <div class="hidden text-[11px] text-slate-500 dark:text-slate-400" id="ask-spans-count"></div>
@@ -188,6 +193,14 @@
 <div class="hidden space-y-2" id="ask-trace-panel">
 <button class="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-semibold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors" id="ask-trace-toggle" type="button">Show Trace</button>
 <pre class="hidden min-h-[64px] max-h-[280px] overflow-auto rounded-lg bg-slate-950 text-slate-100 text-xs p-3 whitespace-pre-wrap" id="ask-trace">Trace not available (enable debug=1)</pre>
+</div>
+<div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-3 text-xs space-y-2" id="ask-runs-panel">
+<div class="flex items-center justify-between gap-3">
+<div class="font-semibold text-slate-700 dark:text-slate-200">Recent Ask Runs</div>
+<button class="px-2.5 py-1 rounded bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-[11px] font-semibold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors" id="ask-runs-refresh" type="button">Refresh</button>
+</div>
+<div class="text-slate-500 dark:text-slate-400" id="ask-runs-empty">No saved runs yet.</div>
+<div class="space-y-2" id="ask-runs-list"></div>
 </div>
 </div>
 <div class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">

@@ -7,6 +7,7 @@ import os
 import sqlite3
 import sys
 from datetime import date, datetime, timezone
+from html import escape as html_escape
 from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs
@@ -45,26 +46,6 @@ def _debug_trace_enabled(query_debug: bool, request: Request) -> bool:
     raw = str(request.query_params.get("debug", "")).strip().lower()
     query_enabled = bool(query_debug) or raw in {"1", "true", "yes", "on"}
     return query_enabled or env_enabled
-
-
-def _sanitize_trace(trace: object) -> object:
-    blocked_exact = {"rows", "raw_rows", "reservation_rows"}
-
-    if isinstance(trace, dict):
-        clean: dict[str, object] = {}
-        for key, value in trace.items():
-            lowered = str(key).strip().lower()
-            if "guest_name" in lowered:
-                continue
-            if lowered in blocked_exact:
-                continue
-            clean[str(key)] = _sanitize_trace(value)
-        return clean
-
-    if isinstance(trace, list):
-        return [_sanitize_trace(item) for item in trace]
-
-    return trace
 
 
 def _parse_iso_date(value: str, *, field: str) -> date:
@@ -173,6 +154,60 @@ def create_app(
     if str(src_root) not in sys.path:
         sys.path.insert(0, str(src_root))
 
+    from ai_deney.ask_runs import (
+        build_request_payload,
+        compare_saved_runs,
+        list_recent_ask_runs,
+        load_ask_run,
+        resolve_runs_root,
+        sanitize_trace,
+        save_ask_run,
+    )
+
+    def _relative_repo_path(path: Path) -> str:
+        return path.resolve().relative_to(root).as_posix()
+
+    def _run_urls(run_id: str) -> dict[str, str]:
+        return {
+            "view": f"/ask-run/{run_id}",
+            "index_md": f"/ask-run/{run_id}/index.md",
+            "request_json": f"/ask-run/{run_id}/request.json",
+            "response_json": f"/ask-run/{run_id}/response.json",
+            "output_md": f"/ask-run/{run_id}/output.md",
+            "output_html": f"/ask-run/{run_id}/output.html",
+        }
+
+    async def _ask_response_payload(payload: AskRequest, include_trace: bool) -> dict[str, object]:
+        question = payload.question.strip()
+        if not question:
+            raise HTTPException(status_code=422, detail="question is required")
+        try:
+            from ai_deney.reports.toy_reports import answer_ask
+
+            result = answer_ask(
+                question,
+                format=payload.format,
+                db_path=app.state.db_path,
+                redact_pii=bool(payload.redact_pii),
+                include_trace=include_trace,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        response: dict[str, object] = {
+            "ok": True,
+            "meta": result["meta"],
+            "output": result["output"],
+            "content_type": result["content_type"],
+        }
+        if "plan" in result:
+            response["plan"] = result["plan"]
+        if "spec" in result:
+            response["spec"] = result["spec"]
+        if include_trace:
+            response["trace"] = sanitize_trace(result.get("trace", {}))
+        return response
+
     @app.get("/health")
     def health() -> dict[str, object]:
         return {"ok": True, "service": "toy_hotel_portal"}
@@ -270,37 +305,174 @@ def create_app(
 
     @app.post("/api/ask")
     async def api_ask(request: Request, payload: AskRequest, debug: bool = False) -> dict[str, object]:
-        question = payload.question.strip()
-        if not question:
-            raise HTTPException(status_code=422, detail="question is required")
         include_trace = _debug_trace_enabled(debug, request)
+        return await _ask_response_payload(payload, include_trace=include_trace)
 
+    @app.post("/api/ask/save")
+    async def api_ask_save(
+        request: Request,
+        payload: AskRequest,
+        debug: bool = False,
+        runs_root: str | None = Query(default=None),
+    ) -> dict[str, object]:
+        include_trace = _debug_trace_enabled(debug, request)
+        response_payload = await _ask_response_payload(payload, include_trace=include_trace)
+        question = payload.question.strip()
+        request_payload = build_request_payload(
+            question=question,
+            ask_format=payload.format,
+            redact_pii=bool(payload.redact_pii),
+            debug=bool(include_trace),
+        )
         try:
-            from ai_deney.reports.toy_reports import answer_ask
-
-            result = answer_ask(
-                question,
-                format=payload.format,
-                db_path=app.state.db_path,
-                redact_pii=bool(payload.redact_pii),
-                include_trace=include_trace,
+            resolved_runs_root = resolve_runs_root(root, runs_root)
+            saved = save_ask_run(
+                repo_root=root,
+                request_payload=request_payload,
+                response_payload=response_payload,
+                output_text=str(response_payload.get("output") or ""),
+                runs_root=resolved_runs_root,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        response: dict[str, object] = {
+        run_id = str(saved["run_id"])
+        files = saved["files"]
+        urls = _run_urls(run_id)
+        return {
             "ok": True,
-            "meta": result["meta"],
-            "output": result["output"],
-            "content_type": result["content_type"],
+            "run_id": run_id,
+            "run_dir": _relative_repo_path(saved["run_dir"]),
+            "files": {
+                "request_json": _relative_repo_path(files["request_json"]),
+                "response_json": _relative_repo_path(files["response_json"]),
+                "output": _relative_repo_path(files["output"]),
+                "index_md": _relative_repo_path(files["index_md"]),
+                "index_url": urls["index_md"],
+                "view_url": urls["view"],
+            },
+            "response": response_payload,
         }
-        if "plan" in result:
-            response["plan"] = result["plan"]
-        if "spec" in result:
-            response["spec"] = result["spec"]
-        if include_trace:
-            response["trace"] = _sanitize_trace(result.get("trace", {}))
-        return response
+
+    @app.get("/api/ask/runs")
+    def api_ask_runs(limit: int = Query(default=20, ge=1, le=200), runs_root: str | None = Query(default=None)) -> dict[str, object]:
+        try:
+            resolved_runs_root = resolve_runs_root(root, runs_root)
+            runs = list_recent_ask_runs(repo_root=root, runs_root=resolved_runs_root, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        rows: list[dict[str, object]] = []
+        for row in runs:
+            rid = str(row["run_id"])
+            urls = _run_urls(rid)
+            out = dict(row)
+            out["run_dir"] = _relative_repo_path(resolved_runs_root / rid)
+            out["index_url"] = urls["index_md"]
+            out["view_url"] = urls["view"]
+            rows.append(out)
+        return {"ok": True, "runs": rows}
+
+    @app.get("/ask-run/{run_id}/{filename}")
+    def ask_run_file(run_id: str, filename: str, runs_root: str | None = Query(default=None)) -> FileResponse:
+        allowed = {"request.json", "response.json", "output.md", "output.html", "index.md"}
+        if filename not in allowed:
+            raise HTTPException(status_code=404, detail="file not found")
+        try:
+            run = load_ask_run(repo_root=root, run_id=run_id, runs_root=runs_root)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        path = (run["run_dir"] / filename).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"path escapes repo root: {path}") from exc
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=404, detail="file not found")
+        media_type = "text/plain"
+        if filename.endswith(".json"):
+            media_type = "application/json"
+        if filename.endswith(".html"):
+            media_type = "text/html"
+        return FileResponse(str(path), media_type=media_type)
+
+    @app.get("/ask-run/{run_id}")
+    def ask_run_view(run_id: str, runs_root: str | None = Query(default=None)) -> Response:
+        try:
+            run = load_ask_run(repo_root=root, run_id=run_id, runs_root=runs_root)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        output_text = str(run["output_text"])
+        output_rendered = f"<pre>{html_escape(output_text)}</pre>"
+        if str(run["output_format"]) == "md":
+            try:
+                import markdown as mdlib
+
+                output_rendered = mdlib.markdown(output_text, extensions=["extra", "tables"])
+            except Exception:
+                output_rendered = f"<pre>{html_escape(output_text)}</pre>"
+
+        request_payload = run["request"] if isinstance(run["request"], dict) else {}
+        response_payload = run["response"] if isinstance(run["response"], dict) else {}
+        spec_payload = response_payload.get("spec", {})
+        meta_payload = response_payload.get("meta", {})
+        content_type = str(response_payload.get("content_type") or "")
+        html = (
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>Ask Run {html_escape(run_id)}</title>"
+            "<style>"
+            "body{font-family:ui-monospace,Menlo,Consolas,monospace;max-width:1080px;margin:24px auto;padding:0 16px;color:#0f172a;}"
+            "a{color:#0369a1;text-decoration:none;}a:hover{text-decoration:underline;}"
+            "code,pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px;display:block;overflow:auto;}"
+            ".card{border:1px solid #e2e8f0;border-radius:10px;padding:14px;margin:14px 0;}"
+            "</style></head><body>"
+            f"<h1>Ask Run {html_escape(run_id)}</h1>"
+            f"<p>Created: {html_escape(str(run.get('created_at') or ''))}</p>"
+            "<div class='card'><h2>Request</h2>"
+            f"<pre>{html_escape(json.dumps(request_payload, indent=2, ensure_ascii=False))}</pre>"
+            "</div>"
+            "<div class='card'><h2>Response Summary</h2>"
+            f"<p>content_type: {html_escape(content_type)}</p>"
+            f"<h3>spec</h3><pre>{html_escape(json.dumps(spec_payload, indent=2, ensure_ascii=False))}</pre>"
+            f"<h3>meta</h3><pre>{html_escape(json.dumps(meta_payload, indent=2, ensure_ascii=False))}</pre>"
+            "</div>"
+            "<div class='card'><h2>Files</h2><ul>"
+            f"<li><a href='/ask-run/{html_escape(run_id)}/request.json' target='_blank' rel='noopener'>request.json</a></li>"
+            f"<li><a href='/ask-run/{html_escape(run_id)}/response.json' target='_blank' rel='noopener'>response.json</a></li>"
+            f"<li><a href='/ask-run/{html_escape(run_id)}/{html_escape(Path(run['output_path']).name)}' target='_blank' rel='noopener'>{html_escape(Path(run['output_path']).name)}</a></li>"
+            f"<li><a href='/ask-run/{html_escape(run_id)}/index.md' target='_blank' rel='noopener'>index.md</a></li>"
+            "</ul></div>"
+            "<div class='card'><h2>Output</h2>"
+            f"{output_rendered}"
+            "</div></body></html>"
+        )
+        return Response(content=html, media_type="text/html")
+
+    @app.get("/api/ask/compare")
+    def api_ask_compare(
+        run_a: str = Query(...),
+        run_b: str = Query(...),
+        format: Literal["md", "html"] = Query(default="md"),
+        runs_root: str | None = Query(default=None),
+    ) -> dict[str, object]:
+        try:
+            return compare_saved_runs(
+                repo_root=root,
+                run_a=run_a,
+                run_b=run_b,
+                ask_format=format,
+                runs_root=runs_root,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return app
 
