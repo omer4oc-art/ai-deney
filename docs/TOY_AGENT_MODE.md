@@ -63,6 +63,20 @@ Usage:
 - Click **Ask** to call `POST /api/ask`.
 - Click **Download** to save the returned output as `.md` or `.html`.
 
+### Debug Trace (Developer Only)
+
+Enable trace output with either:
+- URL query: open dashboard with `?debug=1` (for example `http://127.0.0.1:8011/?debug=1`)
+- Environment variable: `AI_DENEY_TOY_DEBUG_TRACE=1`
+
+When enabled, `/api/ask` includes a `trace` object for deterministic debugging of:
+- intent mode and normalized parse input
+- logical query steps and row counts
+- warnings surfaced by parsing/execution
+
+`trace` intentionally excludes PII fields such as `guest_name` and other row-level guest-name values.
+Timing fields are omitted by default to preserve deterministic trace output across repeated runs.
+
 API payload from the panel:
 
 ```json
@@ -91,7 +105,7 @@ If month/day is provided without year (for example `March 1 and June 3`), the pa
 Example curl request:
 
 ```bash
-curl -fsS -X POST http://127.0.0.1:8011/api/ask \
+curl -fsS -X POST 'http://127.0.0.1:8011/api/ask?debug=1' \
   -H 'content-type: application/json' \
   -d '{"question":"Sales by channel for March 2025","format":"md","redact_pii":true}'
 ```
@@ -104,7 +118,28 @@ Example response shape:
   "spec": {},
   "meta": {},
   "output": "...",
-  "content_type": "text/markdown"
+  "content_type": "text/markdown",
+  "trace": {
+    "intent_mode": "deterministic",
+    "parse": {
+      "raw_question": "Sales by channel for March 2025",
+      "normalized_question": "sales by channel for march 2025",
+      "llm_stub_used": false
+    },
+    "queries": [
+      {
+        "name": "sales_grouped_by_channel",
+        "params": {
+          "end_date": "2025-03-31",
+          "group_by": "channel",
+          "start_date": "2025-03-01"
+        },
+        "row_count": 3
+      }
+    ],
+    "timing": {},
+    "warnings": []
+  }
 }
 ```
 

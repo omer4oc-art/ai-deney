@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,8 @@ def test_dashboard_contains_ask_panel_controls(tmp_path: Path) -> None:
         "ask-format",
         "ask-submit",
         "ask-download",
+        "ask-trace-toggle",
+        "ask-trace",
         "ask-warnings",
         "ask-meta",
         "ask-output",
@@ -268,6 +271,78 @@ def test_ask_endpoint_returns_deterministic_sales_report(tmp_path: Path) -> None
     assert body["meta"]["report_type"] == "sales_by_channel"
     assert "| channel | reservations | total_sales |" in body["output"]
     assert "total_sales: 390.00" in body["output"]
+    assert "trace" not in body
+
+
+def test_ask_endpoint_without_debug_omits_trace(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    ask_res = client.post(
+        "/api/ask",
+        json={
+            "question": "sales by channel for March 2025",
+            "format": "md",
+            "redact_pii": True,
+        },
+    )
+    assert ask_res.status_code == 200
+    body = ask_res.json()
+    assert "trace" not in body
+
+
+def test_ask_endpoint_debug_trace_has_expected_fields_and_no_guest_name(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    payload = {
+        "guest_name": "Trace Guest",
+        "check_in": "2025-03-05",
+        "check_out": "2025-03-07",
+        "room_type": "Deluxe",
+        "adults": 2,
+        "children": 0,
+        "source_channel": "booking",
+        "nightly_rate": 120.00,
+        "total_paid": 240.00,
+        "currency": "USD",
+    }
+    assert client.post("/api/checkin", json=payload).status_code == 200
+
+    ask_res = client.post(
+        "/api/ask?debug=1",
+        json={
+            "question": "sales by source channel for March 2025",
+            "format": "md",
+            "redact_pii": True,
+        },
+    )
+    assert ask_res.status_code == 200
+    body = ask_res.json()
+    assert "trace" in body
+    trace = body["trace"]
+    assert trace["intent_mode"] == "deterministic"
+    assert trace["parse"]["normalized_question"] == "sales by source channel for march 2025"
+    assert isinstance(trace["queries"], list)
+    assert trace["queries"]
+    for query in trace["queries"]:
+        assert "row_count" in query
+        assert isinstance(query["row_count"], int)
+
+    trace_json = json.dumps(trace).lower()
+    assert "guest_name" not in trace_json
+
+
+def test_ask_endpoint_debug_trace_enabled_by_env_var(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AI_DENEY_TOY_DEBUG_TRACE", "1")
+    client = _client_with_tmp_db(tmp_path)
+    ask_res = client.post(
+        "/api/ask",
+        json={
+            "question": "sales by channel for March 2025",
+            "format": "md",
+            "redact_pii": True,
+        },
+    )
+    assert ask_res.status_code == 200
+    body = ask_res.json()
+    assert "trace" in body
 
 
 def test_ask_endpoint_rejects_integer_redact_pii(tmp_path: Path) -> None:

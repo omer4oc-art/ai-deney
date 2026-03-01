@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from datetime import date, datetime, timezone
@@ -37,6 +38,11 @@ class AskRequest(BaseModel):
     question: str
     format: Literal["md", "html"] = "md"
     redact_pii: StrictBool = False
+
+
+def _debug_trace_enabled(query_debug: int) -> bool:
+    env_enabled = str(os.getenv("AI_DENEY_TOY_DEBUG_TRACE", "")).strip() == "1"
+    return int(query_debug) == 1 or env_enabled
 
 
 def _parse_iso_date(value: str, *, field: str) -> date:
@@ -241,10 +247,11 @@ def create_app(
         return Response(content=csv_text, media_type="text/csv", headers=headers)
 
     @app.post("/api/ask")
-    async def api_ask(payload: AskRequest) -> dict[str, object]:
+    async def api_ask(payload: AskRequest, debug: int = Query(0, ge=0, le=1)) -> dict[str, object]:
         question = payload.question.strip()
         if not question:
             raise HTTPException(status_code=422, detail="question is required")
+        include_trace = _debug_trace_enabled(debug)
 
         try:
             from ai_deney.reports.toy_reports import answer_ask
@@ -254,17 +261,21 @@ def create_app(
                 format=payload.format,
                 db_path=app.state.db_path,
                 redact_pii=bool(payload.redact_pii),
+                include_trace=include_trace,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        return {
+        response: dict[str, object] = {
             "ok": True,
             "spec": result["spec"],
             "meta": result["meta"],
             "output": result["output"],
             "content_type": result["content_type"],
         }
+        if include_trace and "trace" in result:
+            response["trace"] = result["trace"]
+        return response
 
     return app
 

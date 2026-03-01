@@ -31,6 +31,46 @@ _SOURCE_FOOTER = "Source: toy_portal SQLite data; generated deterministically fr
 _RESERVATION_LIST_LIMIT = 200
 
 
+def _normalize_question_for_trace(text: str) -> str:
+    return " ".join(str(text or "").strip().lower().split())
+
+
+def _sanitize_trace_params(params: dict[str, object]) -> dict[str, object]:
+    safe: dict[str, object] = {}
+    for key in sorted(params.keys()):
+        lowered = str(key).strip().lower()
+        if not lowered or lowered == "guest_name" or "guest_name" in lowered:
+            continue
+        value = params[key]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe[str(key)] = value
+        elif isinstance(value, tuple):
+            safe[str(key)] = list(value)
+        elif isinstance(value, list):
+            safe[str(key)] = list(value)
+        else:
+            safe[str(key)] = str(value)
+    return safe
+
+
+def _append_query_trace(
+    query_trace: list[dict[str, object]] | None,
+    *,
+    name: str,
+    params: dict[str, object],
+    row_count: int,
+) -> None:
+    if query_trace is None:
+        return
+    query_trace.append(
+        {
+            "name": str(name),
+            "params": _sanitize_trace_params(params),
+            "row_count": int(row_count),
+        }
+    )
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
@@ -62,7 +102,12 @@ def _format_guest_name(name: str, redact: bool) -> str:
     return f"REDACTED_{digest}"
 
 
-def _run_sales_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
+def _run_sales_report(
+    spec: QuerySpec,
+    db_path: Path,
+    *,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     start, end = spec.resolved_range()
     params = (start.isoformat(), end.isoformat())
 
@@ -77,6 +122,12 @@ def _run_sales_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
             """,
             params,
         ).fetchone()
+        _append_query_trace(
+            query_trace,
+            name="sales_totals_in_range",
+            params={"start_date": params[0], "end_date": params[1]},
+            row_count=0 if totals_row is None else 1,
+        )
 
         total_sales = float(totals_row["total_sales"]) if totals_row is not None else 0.0
         reservation_count = int(totals_row["reservation_count"]) if totals_row is not None else 0
@@ -104,6 +155,12 @@ def _run_sales_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
                 }
                 for row in rows
             ]
+            _append_query_trace(
+                query_trace,
+                name="sales_grouped_by_channel",
+                params={"start_date": params[0], "end_date": params[1], "group_by": "channel"},
+                row_count=len(detail_rows),
+            )
         else:
             rows = conn.execute(
                 """
@@ -127,6 +184,12 @@ def _run_sales_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
                 }
                 for row in rows
             ]
+            _append_query_trace(
+                query_trace,
+                name="sales_grouped_by_day",
+                params={"start_date": params[0], "end_date": params[1], "group_by": "day"},
+                row_count=len(detail_rows),
+            )
 
     if spec.report_type == "sales_month" and spec.year and spec.month:
         title = f"Toy Portal Sales Report ({_month_label(spec.year, spec.month)})"
@@ -156,7 +219,12 @@ def _run_sales_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
     }
 
 
-def _run_occupancy_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
+def _run_occupancy_report(
+    spec: QuerySpec,
+    db_path: Path,
+    *,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     start, end = spec.resolved_range()
     days = occupancy_days(db_path, start, end)
     pct = occupancy_pct(days, room_count=ROOM_COUNT)
@@ -168,6 +236,12 @@ def _run_occupancy_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
         }
         for day in days
     ]
+    _append_query_trace(
+        query_trace,
+        name="occupancy_days_in_range",
+        params={"start_date": start.isoformat(), "end_date": end.isoformat(), "room_count": ROOM_COUNT},
+        row_count=len(rows),
+    )
 
     return {
         "title": f"Toy Portal Occupancy Report ({start.isoformat()} to {end.isoformat()})",
@@ -184,7 +258,12 @@ def _run_occupancy_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
     }
 
 
-def _run_reservations_list_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
+def _run_reservations_list_report(
+    spec: QuerySpec,
+    db_path: Path,
+    *,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     start, end = spec.resolved_range()
     raw_rows = reservations_in_window(db_path, start, end, limit=_RESERVATION_LIST_LIMIT)
 
@@ -200,6 +279,17 @@ def _run_reservations_list_report(spec: QuerySpec, db_path: Path) -> dict[str, o
                 "source_channel": str(row.get("source_channel") or ""),
             }
         )
+    _append_query_trace(
+        query_trace,
+        name="reservations_in_window",
+        params={
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "limit": _RESERVATION_LIST_LIMIT,
+            "redact_pii": bool(spec.redact_pii),
+        },
+        row_count=len(rows),
+    )
 
     return {
         "title": f"Toy Portal Reservations List ({start.isoformat()} to {end.isoformat()})",
@@ -214,7 +304,12 @@ def _run_reservations_list_report(spec: QuerySpec, db_path: Path) -> dict[str, o
     }
 
 
-def _run_export_reservations_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
+def _run_export_reservations_report(
+    spec: QuerySpec,
+    db_path: Path,
+    *,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     start, end = spec.resolved_range()
     raw_rows = export_rows_in_window(db_path, start, end)
 
@@ -233,6 +328,17 @@ def _run_export_reservations_report(spec: QuerySpec, db_path: Path) -> dict[str,
                 "currency": str(row.get("currency") or ""),
             }
         )
+    _append_query_trace(
+        query_trace,
+        name="export_rows_in_window",
+        params={
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "preview_limit": 20,
+            "redact_pii": bool(spec.redact_pii),
+        },
+        row_count=len(raw_rows),
+    )
 
     redaction_note = "enabled" if spec.redact_pii else "disabled"
     return {
@@ -250,12 +356,23 @@ def _run_export_reservations_report(spec: QuerySpec, db_path: Path) -> dict[str,
     }
 
 
-def _run_sales_for_dates_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
+def _run_sales_for_dates_report(
+    spec: QuerySpec,
+    db_path: Path,
+    *,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     dates = list(spec.dates)
     if not dates:
         raise ValueError("sales_for_dates requires at least one date")
 
     rows = get_sales_totals_for_dates(db_path, dates)
+    _append_query_trace(
+        query_trace,
+        name="sales_totals_for_dates",
+        params={"dates": dates, "compare": bool(spec.compare)},
+        row_count=len(rows),
+    )
     total_sales_sum = round(sum(float(r["total_sales"]) for r in rows), 2)
     start = str(rows[0]["date"])
     end = str(rows[-1]["date"])
@@ -298,17 +415,22 @@ def _run_sales_for_dates_report(spec: QuerySpec, db_path: Path) -> dict[str, obj
     }
 
 
-def run_query_spec(spec: QuerySpec, db_path: Path) -> dict[str, object]:
+def run_query_spec(
+    spec: QuerySpec,
+    db_path: Path,
+    *,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     if spec.report_type in {"sales_range", "sales_month", "sales_by_channel"}:
-        return _run_sales_report(spec, db_path)
+        return _run_sales_report(spec, db_path, query_trace=query_trace)
     if spec.report_type == "sales_for_dates":
-        return _run_sales_for_dates_report(spec, db_path)
+        return _run_sales_for_dates_report(spec, db_path, query_trace=query_trace)
     if spec.report_type == "occupancy_range":
-        return _run_occupancy_report(spec, db_path)
+        return _run_occupancy_report(spec, db_path, query_trace=query_trace)
     if spec.report_type == "reservations_list":
-        return _run_reservations_list_report(spec, db_path)
+        return _run_reservations_list_report(spec, db_path, query_trace=query_trace)
     if spec.report_type == "export_reservations":
-        return _run_export_reservations_report(spec, db_path)
+        return _run_export_reservations_report(spec, db_path, query_trace=query_trace)
     raise ValueError(f"unsupported report_type: {spec.report_type}")
 
 
@@ -458,6 +580,7 @@ def answer_spec_with_metadata(
     db_path: Path | None = None,
     output_format: OutputFormat | None = None,
     redact_pii: bool = False,
+    include_trace: bool = False,
 ) -> dict[str, object]:
     effective = spec
     if redact_pii and not effective.redact_pii:
@@ -468,10 +591,11 @@ def answer_spec_with_metadata(
             effective = replace(effective, format=out_fmt)
 
     db = _resolve_db_path(db_path)
-    report_data = run_query_spec(effective, db)
+    query_trace: list[dict[str, object]] | None = [] if include_trace else None
+    report_data = run_query_spec(effective, db, query_trace=query_trace)
     final_format: OutputFormat = "markdown" if effective.format == "md" else "html"
     rendered = render_report(report_data, output_format=final_format)
-    return {
+    result: dict[str, object] = {
         "report": rendered,
         "spec": effective.to_dict(),
         "metadata": {
@@ -491,6 +615,9 @@ def answer_spec_with_metadata(
             "occupancy_pct": report_data.get("occupancy_pct"),
         },
     }
+    if include_trace:
+        result["trace_queries"] = list(query_trace or [])
+    return result
 
 
 def answer_ask_from_spec(
@@ -501,9 +628,16 @@ def answer_ask_from_spec(
     db_path: Path | None = None,
     intent_mode: str = "deterministic",
     warnings: list[str] | None = None,
+    include_trace: bool = False,
 ) -> dict[str, object]:
     output_format: OutputFormat = "markdown" if format == "md" else "html"
-    result = answer_spec_with_metadata(spec, db_path=db_path, output_format=output_format, redact_pii=redact_pii)
+    result = answer_spec_with_metadata(
+        spec,
+        db_path=db_path,
+        output_format=output_format,
+        redact_pii=redact_pii,
+        include_trace=include_trace,
+    )
     meta = dict(result["metadata"])
     meta["intent_mode"] = intent_mode
     merged_warnings = list(meta.get("warnings") or [])
@@ -512,12 +646,15 @@ def answer_ask_from_spec(
             merged_warnings.append(item)
     meta["warnings"] = merged_warnings
     content_type = "text/html" if format == "html" else "text/markdown"
-    return {
+    payload: dict[str, object] = {
         "spec": result["spec"],
         "meta": meta,
         "output": str(result["report"]),
         "content_type": content_type,
     }
+    if include_trace:
+        payload["_trace_queries"] = list(result.get("trace_queries") or [])
+    return payload
 
 
 def answer_ask(
@@ -528,20 +665,37 @@ def answer_ask(
     db_path: Path | None = None,
     intent_mode: str | None = None,
     llm_router: ToyLLMRouter | None = None,
+    include_trace: bool = False,
 ) -> dict[str, object]:
     mode = resolve_intent_mode(intent_mode)
     from ai_deney.intent.toy_intent import parse_toy_query_with_trace
 
     parsed = parse_toy_query_with_trace(text, intent_mode=mode, llm_router=llm_router)
     spec = parsed.spec
-    return answer_ask_from_spec(
+    result = answer_ask_from_spec(
         spec,
         format=format,
         redact_pii=redact_pii,
         db_path=db_path,
         intent_mode=mode,
         warnings=list(parsed.warnings),
+        include_trace=include_trace,
     )
+    if include_trace:
+        trace_queries = list(result.pop("_trace_queries", []) or [])
+        cleaned = str(text or "").strip()
+        result["trace"] = {
+            "intent_mode": mode,
+            "parse": {
+                "raw_question": cleaned,
+                "normalized_question": _normalize_question_for_trace(cleaned),
+                "llm_stub_used": parsed.raw_llm_json is not None,
+            },
+            "queries": trace_queries,
+            "timing": {},
+            "warnings": list(result.get("meta", {}).get("warnings", [])),
+        }
+    return result
 
 
 def answer_with_metadata(

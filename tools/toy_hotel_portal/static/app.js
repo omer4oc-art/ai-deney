@@ -1,12 +1,13 @@
 (function () {
   "use strict";
 
-  var debugMode = window.location.search.indexOf("debug=1") !== -1;
+  var debugMode = new URLSearchParams(window.location.search).get("debug") === "1";
   var warnedEmptyOccupancy = false;
   var lastAskOutput = "";
   var lastAskFormat = "md";
   var lastAskContentType = "text/markdown";
   var lastAskQuestion = "";
+  var askTraceExpanded = false;
 
   function byId(id) {
     return document.getElementById(id);
@@ -351,6 +352,50 @@
     askWarnings.textContent = "Warnings:\\n- " + list.join("\\n- ");
   }
 
+  function setAskTraceExpanded(expanded) {
+    var askTrace = byId("ask-trace");
+    var askTraceToggle = byId("ask-trace-toggle");
+    askTraceExpanded = Boolean(expanded);
+    if (askTrace) {
+      askTrace.classList.toggle("hidden", !askTraceExpanded);
+    }
+    if (askTraceToggle) {
+      askTraceToggle.textContent = askTraceExpanded ? "Hide Trace" : "Show Trace";
+    }
+  }
+
+  function renderAskTrace(trace) {
+    var askTrace = byId("ask-trace");
+    if (!askTrace) {
+      return;
+    }
+    if (!trace || typeof trace !== "object") {
+      askTrace.textContent = "Trace not available (enable debug=1)";
+      return;
+    }
+    askTrace.textContent = JSON.stringify(trace, null, 2);
+  }
+
+  function initAskTracePanel() {
+    var askTracePanel = byId("ask-trace-panel");
+    var askTraceToggle = byId("ask-trace-toggle");
+    if (!askTracePanel || !askTraceToggle) {
+      return;
+    }
+    if (!debugMode) {
+      askTracePanel.classList.add("hidden");
+      askTracePanel.style.display = "none";
+      return;
+    }
+    askTracePanel.classList.remove("hidden");
+    askTracePanel.style.display = "block";
+    setAskTraceExpanded(false);
+    renderAskTrace(null);
+    askTraceToggle.addEventListener("click", function () {
+      setAskTraceExpanded(!askTraceExpanded);
+    });
+  }
+
   async function refreshDashboard() {
     var startInput = byId("start-date");
     var endInput = byId("end-date");
@@ -401,7 +446,8 @@
     setAskBusy(true);
     setAskStatus("Running...");
     try {
-      var response = await fetchJson("/api/ask", {
+      var askUrl = debugMode ? "/api/ask?debug=1" : "/api/ask";
+      var response = await fetchJson(askUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: question, format: format, redact_pii: redactValue }),
@@ -414,11 +460,13 @@
       renderAskOutput(output, format, contentType);
       renderAskMeta(response.spec || {}, response.meta || {});
       renderAskWarnings((response.meta || {}).warnings || []);
+      renderAskTrace(response.trace || null);
       setAskStatus("Done.");
     } catch (err) {
       lastAskOutput = "";
       renderAskMeta({}, {});
       renderAskWarnings([]);
+      renderAskTrace(null);
       renderAskOutput("Ask failed: " + err.message, "md", "text/markdown");
       setAskStatus("Error.");
       throw err;
@@ -473,6 +521,7 @@
         downloadAskOutput();
       });
     }
+    initAskTracePanel();
 
     // Smoke check: Open http://127.0.0.1:8011/?debug=1 and verify bars render.
     refreshDashboard().catch(function (err) {
