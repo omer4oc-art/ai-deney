@@ -328,13 +328,14 @@
     if (!askMeta) {
       return;
     }
-    var reportType = spec && spec.report_type ? String(spec.report_type) : "";
+    var reportType = spec && spec.report_type ? String(spec.report_type) : (meta && meta.report_type ? String(meta.report_type) : "");
     var start = meta && meta.start ? String(meta.start) : "";
     var end = meta && meta.end ? String(meta.end) : "";
     var range = start && end ? start + ".." + end : "";
     var totalSales = meta && meta.total_sales != null ? String(Number(meta.total_sales).toFixed(2)) : "";
     var intentMode = meta && meta.intent_mode ? String(meta.intent_mode) : "";
-    askMeta.textContent = "report_type=" + reportType + "  range=" + range + (totalSales ? "  total_sales=" + totalSales : "") + (intentMode ? "  intent_mode=" + intentMode : "");
+    var executedCount = meta && meta.executed_count != null ? String(meta.executed_count) : "";
+    askMeta.textContent = "report_type=" + reportType + "  range=" + range + (totalSales ? "  total_sales=" + totalSales : "") + (executedCount ? "  executed_count=" + executedCount : "") + (intentMode ? "  intent_mode=" + intentMode : "");
   }
 
   function renderAskWarnings(warnings) {

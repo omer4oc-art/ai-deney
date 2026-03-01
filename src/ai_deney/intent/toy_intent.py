@@ -14,6 +14,7 @@ ReportType = Literal[
     "sales_range",
     "sales_month",
     "sales_by_channel",
+    "sales_day",
     "sales_for_dates",
     "occupancy_range",
     "reservations_list",
@@ -138,6 +139,16 @@ ToyQuerySpec = QuerySpec
 @dataclass(frozen=True)
 class ToyParseResult:
     spec: QuerySpec
+    raw_llm_json: dict[str, object] | None
+    intent_mode: IntentMode
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ToyPlanResult:
+    spec: QuerySpec | None
+    plan: tuple[QuerySpec, ...]
+    compare: bool
     raw_llm_json: dict[str, object] | None
     intent_mode: IntentMode
     warnings: tuple[str, ...] = ()
@@ -348,6 +359,66 @@ def _default_llm_router(question: str) -> Mapping[str, object] | str:
     return route_toy_query_spec(question)
 
 
+def _llm_stub_source() -> str:
+    if str(os.getenv("AI_DENEY_TOY_LLM_STUB_JSON", "")).strip():
+        return "env_json"
+    if str(os.getenv("AI_DENEY_TOY_LLM_STUB_FILE", "")).strip():
+        return "env_file"
+    return "router_default"
+
+
+def _deterministic_rule_trace(text: str, candidate: Mapping[str, object]) -> tuple[str, list[str]]:
+    lowered = text.lower()
+    matched: list[str] = []
+    if _DATE_RANGE_RE.search(text):
+        matched.append("date_range")
+    if _MONTH_YEAR_RE.search(text) or _YEAR_MONTH_RE.search(text):
+        matched.append("month_year")
+    if _ISO_DATE_RE.search(text):
+        matched.append("iso_date")
+    if _MONTH_DAY_RE.search(text):
+        matched.append("month_day")
+    if _COMPARE_RE.search(text):
+        matched.append("compare")
+    if "by channel" in lowered or "by source channel" in lowered or "channel breakdown" in lowered:
+        matched.append("group_by_channel")
+    if "occupancy" in lowered:
+        matched.append("occupancy_keyword")
+    if "export" in lowered and "reservation" in lowered:
+        matched.append("export_keyword")
+    if "reservation" in lowered:
+        matched.append("reservation_keyword")
+    if "sales" in lowered:
+        matched.append("sales_keyword")
+
+    report_type = str(candidate.get("report_type") or "")
+    rule_path = "fallback"
+    if report_type == "occupancy_range":
+        rule_path = "deterministic.occupancy_keyword"
+    elif report_type == "export_reservations":
+        rule_path = "deterministic.export_keyword"
+    elif report_type == "reservations_list":
+        rule_path = "deterministic.reservations_keyword"
+    elif report_type == "sales_by_channel":
+        rule_path = "deterministic.sales.channel"
+    elif report_type == "sales_for_dates":
+        rule_path = "deterministic.sales.compare_dates" if _COMPARE_RE.search(text) else "deterministic.sales.date_points"
+    elif report_type == "sales_month":
+        rule_path = "deterministic.sales.month"
+    elif report_type == "sales_range":
+        rule_path = "deterministic.sales.date_range" if _DATE_RANGE_RE.search(text) else "deterministic.sales.range"
+
+    return rule_path, matched
+
+
+def _resolved_range_fields(spec: QuerySpec) -> tuple[str | None, str | None]:
+    if spec.start_date and spec.end_date:
+        return spec.start_date, spec.end_date
+    if spec.report_type == "sales_for_dates" and spec.dates:
+        return str(spec.dates[0]), str(spec.dates[-1])
+    return None, None
+
+
 def _coerce_router_output(raw: Mapping[str, object] | str) -> dict[str, object]:
     if isinstance(raw, Mapping):
         return dict(raw)
@@ -378,13 +449,14 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
         "sales_range",
         "sales_month",
         "sales_by_channel",
+        "sales_day",
         "sales_for_dates",
         "occupancy_range",
         "reservations_list",
         "export_reservations",
     }:
         raise ValueError(
-            "report_type must be one of sales_range, sales_month, sales_by_channel, sales_for_dates, "
+            "report_type must be one of sales_range, sales_month, sales_by_channel, sales_day, sales_for_dates, "
             "occupancy_range, reservations_list, export_reservations"
         )
 
@@ -476,6 +548,15 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
             raise ValueError("sales_for_dates compare=true requires at least 2 dates")
         if group_by is not None:
             raise ValueError("sales_for_dates does not support group_by")
+    elif report_type == "sales_day":
+        if dates_list:
+            raise ValueError("sales_day does not support dates[]; use start_date/end_date for the day")
+        if start_date is None or end_date is None:
+            raise ValueError("sales_day requires start_date and end_date")
+        if start_date != end_date:
+            raise ValueError("sales_day requires start_date == end_date")
+        if group_by is not None:
+            raise ValueError("sales_day does not support group_by")
     elif dates_list:
         raise ValueError("dates is only supported for report_type=sales_for_dates")
 
@@ -555,6 +636,117 @@ def parse_toy_query_with_trace(
     raw_llm_json = _coerce_router_output(raw)
     spec = validate_query_spec(raw_llm_json, question_text=cleaned)
     return ToyParseResult(spec=spec, raw_llm_json=raw_llm_json, intent_mode="llm", warnings=())
+
+
+def parse_toy_query_debug_trace(
+    text: str,
+    *,
+    intent_mode: str | None = None,
+    llm_router: ToyLLMRouter | None = None,
+) -> tuple[QuerySpec, dict[str, object]]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        raise ValueError("query text cannot be empty")
+
+    mode = resolve_intent_mode(intent_mode)
+
+    if mode == "deterministic":
+        candidate, warnings = _deterministic_candidate(cleaned)
+        spec = validate_query_spec(candidate, question_text=cleaned)
+        start_date, end_date = _resolved_range_fields(spec)
+        rule_path, matched_patterns = _deterministic_rule_trace(cleaned, candidate)
+        trace = {
+            "mode": "deterministic",
+            "rule_path": rule_path,
+            "matched_patterns": matched_patterns,
+            "parsed": {
+                "start_date": start_date,
+                "end_date": end_date,
+                "year": spec.year,
+                "month": spec.month,
+                "dates": list(spec.dates),
+            },
+            "chosen": {
+                "report_type": spec.report_type,
+                "group_by": spec.group_by,
+            },
+            "validation_notes": list(warnings) + ["QuerySpec validation: pass"],
+        }
+        return spec, trace
+
+    router = llm_router or _default_llm_router
+    try:
+        raw = router(cleaned)
+    except Exception as exc:
+        raise ValueError(f"llm router failed: {exc}") from exc
+
+    raw_llm_json = _coerce_router_output(raw)
+    spec = validate_query_spec(raw_llm_json, question_text=cleaned)
+    start_date, end_date = _resolved_range_fields(spec)
+    trace = {
+        "mode": "llm",
+        "stub_source": _llm_stub_source(),
+        "validation": {
+            "passed": True,
+            "summary": "QuerySpec validation: pass",
+        },
+        "parsed": {
+            "start_date": start_date,
+            "end_date": end_date,
+            "year": spec.year,
+            "month": spec.month,
+            "dates": list(spec.dates),
+        },
+        "chosen": {
+            "report_type": spec.report_type,
+            "group_by": spec.group_by,
+        },
+        "validation_notes": ["QuerySpec validation: pass"],
+    }
+    return spec, trace
+
+
+def _sales_day_spec_from_date(base: QuerySpec, day: str) -> QuerySpec:
+    return QuerySpec(
+        report_type="sales_day",
+        start_date=str(day),
+        end_date=str(day),
+        year=None,
+        month=None,
+        group_by=None,
+        dates=(),
+        compare=False,
+        redact_pii=bool(base.redact_pii),
+        format=base.format,
+    )
+
+
+def parse_toy_query_plan_with_trace(
+    text: str,
+    *,
+    intent_mode: str | None = None,
+    llm_router: ToyLLMRouter | None = None,
+) -> ToyPlanResult:
+    parsed = parse_toy_query_with_trace(text, intent_mode=intent_mode, llm_router=llm_router)
+    spec = parsed.spec
+    if spec.report_type == "sales_for_dates" and len(spec.dates) >= 2:
+        plan = tuple(_sales_day_spec_from_date(spec, day) for day in spec.dates)
+        return ToyPlanResult(
+            spec=None,
+            plan=plan,
+            compare=bool(spec.compare),
+            raw_llm_json=parsed.raw_llm_json,
+            intent_mode=parsed.intent_mode,
+            warnings=tuple(parsed.warnings),
+        )
+    return ToyPlanResult(
+        spec=spec,
+        plan=(),
+        compare=False,
+        raw_llm_json=parsed.raw_llm_json,
+        intent_mode=parsed.intent_mode,
+        warnings=tuple(parsed.warnings),
+    )
 
 
 def parse_toy_query(

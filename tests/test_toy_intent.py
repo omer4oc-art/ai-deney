@@ -4,7 +4,12 @@ from datetime import date
 
 import pytest
 
-from ai_deney.intent.toy_intent import parse_toy_query, parse_toy_query_with_trace, validate_query_spec
+from ai_deney.intent.toy_intent import (
+    parse_toy_query,
+    parse_toy_query_plan_with_trace,
+    parse_toy_query_with_trace,
+    validate_query_spec,
+)
 
 
 @pytest.mark.parametrize(
@@ -122,6 +127,19 @@ def test_parse_sales_for_dates_compare_and_default_year_warning() -> None:
     assert list(parsed.spec.dates) == ["2025-03-01", "2025-06-03"]
     assert parsed.spec.compare is True
     assert any("defaulted to 2025" in w for w in parsed.warnings)
+
+
+def test_parse_plan_for_multiple_dates_uses_sales_day_specs() -> None:
+    parsed = parse_toy_query_plan_with_trace(
+        "Give me total sales for March 1st 2025 and June 3rd 2025, and compare them.",
+        intent_mode="deterministic",
+    )
+    assert parsed.spec is None
+    assert len(parsed.plan) == 2
+    assert parsed.compare is True
+    assert [step.report_type for step in parsed.plan] == ["sales_day", "sales_day"]
+    assert [step.start_date for step in parsed.plan] == ["2025-03-01", "2025-06-03"]
+    assert [step.end_date for step in parsed.plan] == ["2025-03-01", "2025-06-03"]
 
 
 def test_validate_sales_for_dates_requires_dates_list() -> None:

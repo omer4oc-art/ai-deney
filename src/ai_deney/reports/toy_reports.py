@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime
 from html import escape
 from pathlib import Path
 from typing import Literal
@@ -13,6 +13,7 @@ from typing import Literal
 from ai_deney.intent.toy_intent import (
     QuerySpec,
     ToyLLMRouter,
+    parse_toy_query_plan_with_trace,
     resolve_intent_mode,
 )
 from tools.toy_hotel_portal.db import (
@@ -100,6 +101,117 @@ def _format_guest_name(name: str, redact: bool) -> str:
         return name
     digest = hashlib.sha256(str(name).encode("utf-8")).hexdigest()[:12]
     return f"REDACTED_{digest}"
+
+
+def run_sales_day(
+    sales_date: str,
+    db_path: Path,
+    *,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    day = date.fromisoformat(str(sales_date)).isoformat()
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS reservations,
+                ROUND(COALESCE(SUM(total_paid), 0.0), 2) AS total_sales
+            FROM reservations
+            WHERE check_in = ?
+            """,
+            (day,),
+        ).fetchone()
+    reservations = int((row["reservations"] if row is not None else 0) or 0)
+    total_sales = float((row["total_sales"] if row is not None else 0.0) or 0.0)
+    _append_query_trace(
+        query_trace,
+        name="sales_day_total",
+        params={"date": day},
+        row_count=1,
+    )
+    return {
+        "date": day,
+        "reservations": reservations,
+        "total_sales": round(total_sales, 2),
+    }
+
+
+def _run_sales_day_report(
+    spec: QuerySpec,
+    db_path: Path,
+    *,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    if not spec.start_date or not spec.end_date or spec.start_date != spec.end_date:
+        raise ValueError("sales_day requires start_date == end_date")
+    row = run_sales_day(spec.start_date, db_path, query_trace=query_trace)
+    return {
+        "title": f"Toy Portal Sales Day Total ({row['date']})",
+        "notes": "Sales definition: SUM(total_paid) for reservations whose check_in date equals the target day.",
+        "report_type": "sales_day",
+        "start": str(row["date"]),
+        "end": str(row["date"]),
+        "group_by": None,
+        "reservation_count": int(row["reservations"]),
+        "total_sales": float(row["total_sales"]),
+        "date_count": 1,
+        "totals_by_date_count": 1,
+        "columns": ["date", "reservations", "total_sales"],
+        "rows": [row],
+        "warnings": [],
+    }
+
+
+def execute_query_plan(
+    plan: list[QuerySpec] | tuple[QuerySpec, ...],
+    *,
+    db_path: Path,
+    compare: bool = False,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    if not plan:
+        raise ValueError("query plan cannot be empty")
+
+    rows: list[dict[str, object]] = []
+    for idx, step in enumerate(plan):
+        if step.report_type != "sales_day":
+            raise ValueError(f"unsupported plan step at index {idx}: {step.report_type}")
+        if not step.start_date or not step.end_date or step.start_date != step.end_date:
+            raise ValueError(f"sales_day plan step at index {idx} must have start_date == end_date")
+        rows.append(run_sales_day(step.start_date, db_path, query_trace=query_trace))
+
+    analysis_lines: list[str] = []
+    if compare and len(rows) >= 2:
+        first = rows[0]
+        second = rows[-1]
+        delta = round(float(second["total_sales"]) - float(first["total_sales"]), 2)
+        base = float(first["total_sales"])
+        pct_delta = round((delta / base * 100.0), 2) if base != 0 else 0.0
+        analysis_lines.append(f"delta_total_sales({second['date']} - {first['date']}): {delta:.2f}")
+        analysis_lines.append(f"pct_delta_total_sales: {pct_delta:.2f}%")
+
+    total_sales_sum = round(sum(float(r["total_sales"]) for r in rows), 2)
+    start = str(rows[0]["date"])
+    end = str(rows[-1]["date"])
+    return {
+        "title": "Toy Portal Sales Totals by Planned Dates",
+        "notes": "Plan execution: deterministic SUM(total_paid) for each explicit check_in date.",
+        "report_type": "sales_day_plan",
+        "start": start,
+        "end": end,
+        "group_by": None,
+        "compare": bool(compare),
+        "executed_count": len(rows),
+        "date_count": len(rows),
+        "totals_by_date_count": len(rows),
+        "reservation_count": sum(int(r["reservations"]) for r in rows),
+        "total_sales": total_sales_sum,
+        "total_sales_sum": total_sales_sum,
+        "analysis_lines": analysis_lines,
+        "columns": ["date", "reservations", "total_sales"],
+        "rows": rows,
+        "warnings": [],
+    }
 
 
 def _run_sales_report(
@@ -423,6 +535,8 @@ def run_query_spec(
 ) -> dict[str, object]:
     if spec.report_type in {"sales_range", "sales_month", "sales_by_channel"}:
         return _run_sales_report(spec, db_path, query_trace=query_trace)
+    if spec.report_type == "sales_day":
+        return _run_sales_day_report(spec, db_path, query_trace=query_trace)
     if spec.report_type == "sales_for_dates":
         return _run_sales_for_dates_report(spec, db_path, query_trace=query_trace)
     if spec.report_type == "occupancy_range":
@@ -657,6 +771,65 @@ def answer_ask_from_spec(
     return payload
 
 
+def answer_ask_from_plan(
+    plan: list[QuerySpec] | tuple[QuerySpec, ...],
+    *,
+    format: AskFormat = "md",
+    redact_pii: bool = False,
+    db_path: Path | None = None,
+    intent_mode: str = "deterministic",
+    warnings: list[str] | None = None,
+    compare: bool = False,
+    include_trace: bool = False,
+) -> dict[str, object]:
+    if not plan:
+        raise ValueError("plan cannot be empty")
+
+    effective_plan = list(plan)
+    if redact_pii:
+        effective_plan = [replace(step, redact_pii=True) if not step.redact_pii else step for step in effective_plan]
+    if format in {"md", "html"}:
+        effective_plan = [replace(step, format=format) if step.format != format else step for step in effective_plan]
+
+    db = _resolve_db_path(db_path)
+    query_trace: list[dict[str, object]] | None = [] if include_trace else None
+    report_data = execute_query_plan(effective_plan, db_path=db, compare=compare, query_trace=query_trace)
+    final_format: OutputFormat = "markdown" if format == "md" else "html"
+    rendered = render_report(report_data, output_format=final_format)
+
+    meta: dict[str, object] = {
+        "db_path": str(db),
+        "output_format": final_format,
+        "report_type": report_data["report_type"],
+        "group_by": None,
+        "start": report_data["start"],
+        "end": report_data["end"],
+        "reservation_count": report_data.get("reservation_count"),
+        "total_sales": report_data.get("total_sales"),
+        "total_sales_sum": report_data.get("total_sales_sum"),
+        "date_count": report_data.get("date_count"),
+        "totals_by_date_count": report_data.get("totals_by_date_count"),
+        "compare": bool(report_data.get("compare", False)),
+        "executed_count": report_data.get("executed_count"),
+        "warnings": list(report_data.get("warnings") or []),
+        "occupancy_pct": report_data.get("occupancy_pct"),
+    }
+    for item in list(warnings or []):
+        if item not in meta["warnings"]:
+            meta["warnings"].append(item)
+    meta["intent_mode"] = intent_mode
+
+    payload: dict[str, object] = {
+        "plan": [step.to_dict() for step in effective_plan],
+        "meta": meta,
+        "output": str(rendered),
+        "content_type": "text/html" if format == "html" else "text/markdown",
+    }
+    if include_trace:
+        payload["_trace_queries"] = list(query_trace or [])
+    return payload
+
+
 def answer_ask(
     text: str,
     *,
@@ -668,32 +841,58 @@ def answer_ask(
     include_trace: bool = False,
 ) -> dict[str, object]:
     mode = resolve_intent_mode(intent_mode)
-    from ai_deney.intent.toy_intent import parse_toy_query_with_trace
+    parsed = parse_toy_query_plan_with_trace(text, intent_mode=mode, llm_router=llm_router)
 
-    parsed = parse_toy_query_with_trace(text, intent_mode=mode, llm_router=llm_router)
-    spec = parsed.spec
-    result = answer_ask_from_spec(
-        spec,
-        format=format,
-        redact_pii=redact_pii,
-        db_path=db_path,
-        intent_mode=mode,
-        warnings=list(parsed.warnings),
-        include_trace=include_trace,
-    )
+    if parsed.plan:
+        result = answer_ask_from_plan(
+            parsed.plan,
+            format=format,
+            redact_pii=redact_pii,
+            db_path=db_path,
+            intent_mode=mode,
+            warnings=list(parsed.warnings),
+            compare=bool(parsed.compare),
+            include_trace=include_trace,
+        )
+        chosen_report_type = "sales_day_plan"
+        chosen_group_by = None
+        parsed_dates = [str(step.start_date or "") for step in parsed.plan]
+        parsed_start = parsed_dates[0] if parsed_dates else None
+        parsed_end = parsed_dates[-1] if parsed_dates else None
+    else:
+        if parsed.spec is None:
+            raise ValueError("plan parser returned neither spec nor plan")
+        result = answer_ask_from_spec(
+            parsed.spec,
+            format=format,
+            redact_pii=redact_pii,
+            db_path=db_path,
+            intent_mode=mode,
+            warnings=list(parsed.warnings),
+            include_trace=include_trace,
+        )
+        chosen_report_type = parsed.spec.report_type
+        chosen_group_by = parsed.spec.group_by
+        parsed_dates = list(parsed.spec.dates)
+        parsed_start = parsed.spec.start_date
+        parsed_end = parsed.spec.end_date
+
     if include_trace:
         trace_queries = list(result.pop("_trace_queries", []) or [])
         cleaned = str(text or "").strip()
         result["trace"] = {
-            "intent_mode": mode,
-            "parse": {
-                "raw_question": cleaned,
-                "normalized_question": _normalize_question_for_trace(cleaned),
-                "llm_stub_used": parsed.raw_llm_json is not None,
+            "mode": mode,
+            "parsed": {
+                "start_date": parsed_start,
+                "end_date": parsed_end,
+                "dates": parsed_dates,
             },
+            "chosen": {
+                "report_type": chosen_report_type,
+                "group_by": chosen_group_by,
+            },
+            "validation_notes": list(parsed.warnings) + ["QuerySpec validation: pass"],
             "queries": trace_queries,
-            "timing": {},
-            "warnings": list(result.get("meta", {}).get("warnings", [])),
         }
     return result
 
@@ -717,9 +916,12 @@ def answer_with_metadata(
     )
     result = {
         "report": ask_result["output"],
-        "spec": ask_result["spec"],
         "metadata": ask_result["meta"],
     }
+    if "spec" in ask_result:
+        result["spec"] = ask_result["spec"]
+    if "plan" in ask_result:
+        result["plan"] = ask_result["plan"]
     return result
 
 

@@ -274,7 +274,7 @@ def test_ask_endpoint_returns_deterministic_sales_report(tmp_path: Path) -> None
     assert "trace" not in body
 
 
-def test_ask_endpoint_without_debug_omits_trace(tmp_path: Path) -> None:
+def test_debug_trace_absent_by_default(tmp_path: Path) -> None:
     client = _client_with_tmp_db(tmp_path)
     ask_res = client.post(
         "/api/ask",
@@ -289,7 +289,7 @@ def test_ask_endpoint_without_debug_omits_trace(tmp_path: Path) -> None:
     assert "trace" not in body
 
 
-def test_ask_endpoint_debug_trace_has_expected_fields_and_no_guest_name(tmp_path: Path) -> None:
+def test_debug_trace_present_and_sanitized(tmp_path: Path) -> None:
     client = _client_with_tmp_db(tmp_path)
     payload = {
         "guest_name": "Trace Guest",
@@ -317,16 +317,19 @@ def test_ask_endpoint_debug_trace_has_expected_fields_and_no_guest_name(tmp_path
     body = ask_res.json()
     assert "trace" in body
     trace = body["trace"]
-    assert trace["intent_mode"] == "deterministic"
-    assert trace["parse"]["normalized_question"] == "sales by source channel for march 2025"
-    assert isinstance(trace["queries"], list)
-    assert trace["queries"]
-    for query in trace["queries"]:
-        assert "row_count" in query
-        assert isinstance(query["row_count"], int)
+    assert isinstance(trace, (dict, list))
+    assert isinstance(trace, dict)
+    assert trace["mode"] == "deterministic"
+    assert trace["chosen"]["report_type"] == "sales_by_channel"
+    assert trace["chosen"]["group_by"] == "channel"
+    assert "parsed" in trace
+    assert "start_date" in trace["parsed"]
+    assert "end_date" in trace["parsed"]
+    assert "validation_notes" in trace
 
     trace_json = json.dumps(trace).lower()
     assert "guest_name" not in trace_json
+    assert "\"rows\"" not in trace_json
 
 
 def test_ask_endpoint_debug_trace_enabled_by_env_var(tmp_path: Path, monkeypatch) -> None:
@@ -519,10 +522,13 @@ def test_ask_sales_for_dates_iso_query(tmp_path: Path) -> None:
     )
     assert ask_res.status_code == 200
     body = ask_res.json()
-    assert body["spec"]["report_type"] == "sales_for_dates"
-    assert body["spec"]["dates"] == ["2025-03-01", "2025-06-03"]
+    assert "spec" not in body
+    assert "plan" in body
+    assert [step["report_type"] for step in body["plan"]] == ["sales_day", "sales_day"]
+    assert [step["start_date"] for step in body["plan"]] == ["2025-03-01", "2025-06-03"]
     assert body["meta"]["date_count"] == 2
     assert body["meta"]["totals_by_date_count"] == 2
+    assert body["meta"]["executed_count"] == 2
     assert "2025-03-01" in body["output"]
     assert "2025-06-03" in body["output"]
 
@@ -558,10 +564,15 @@ def test_ask_sales_for_dates_compare_includes_delta_line(tmp_path: Path) -> None
     )
     assert ask_res.status_code == 200
     body = ask_res.json()
-    assert body["spec"]["report_type"] == "sales_for_dates"
-    assert body["spec"]["compare"] is True
+    assert "spec" not in body
+    assert "plan" in body
+    assert len(body["plan"]) == 2
+    assert body["meta"]["executed_count"] == 2
+    assert body["meta"]["compare"] is True
     assert "delta_total_sales" in body["output"]
     assert "pct_delta_total_sales" in body["output"]
+    assert "delta_total_sales(2025-06-03 - 2025-03-01): 300.00" in body["output"]
+    assert "pct_delta_total_sales: 150.00%" in body["output"]
 
 
 def test_ask_sales_for_dates_missing_year_adds_warning(tmp_path: Path) -> None:
@@ -595,7 +606,8 @@ def test_ask_sales_for_dates_missing_year_adds_warning(tmp_path: Path) -> None:
     )
     assert ask_res.status_code == 200
     body = ask_res.json()
-    assert body["spec"]["report_type"] == "sales_for_dates"
+    assert "spec" not in body
+    assert "plan" in body
     assert body["meta"]["warnings"]
     assert any("defaulted to 2025" in str(w) for w in body["meta"]["warnings"])
 

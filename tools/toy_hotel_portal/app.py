@@ -40,9 +40,31 @@ class AskRequest(BaseModel):
     redact_pii: StrictBool = False
 
 
-def _debug_trace_enabled(query_debug: int) -> bool:
+def _debug_trace_enabled(query_debug: bool, request: Request) -> bool:
     env_enabled = str(os.getenv("AI_DENEY_TOY_DEBUG_TRACE", "")).strip() == "1"
-    return int(query_debug) == 1 or env_enabled
+    raw = str(request.query_params.get("debug", "")).strip().lower()
+    query_enabled = bool(query_debug) or raw in {"1", "true", "yes", "on"}
+    return query_enabled or env_enabled
+
+
+def _sanitize_trace(trace: object) -> object:
+    blocked_exact = {"rows", "raw_rows", "reservation_rows"}
+
+    if isinstance(trace, dict):
+        clean: dict[str, object] = {}
+        for key, value in trace.items():
+            lowered = str(key).strip().lower()
+            if "guest_name" in lowered:
+                continue
+            if lowered in blocked_exact:
+                continue
+            clean[str(key)] = _sanitize_trace(value)
+        return clean
+
+    if isinstance(trace, list):
+        return [_sanitize_trace(item) for item in trace]
+
+    return trace
 
 
 def _parse_iso_date(value: str, *, field: str) -> date:
@@ -247,11 +269,11 @@ def create_app(
         return Response(content=csv_text, media_type="text/csv", headers=headers)
 
     @app.post("/api/ask")
-    async def api_ask(payload: AskRequest, debug: int = Query(0, ge=0, le=1)) -> dict[str, object]:
+    async def api_ask(request: Request, payload: AskRequest, debug: bool = False) -> dict[str, object]:
         question = payload.question.strip()
         if not question:
             raise HTTPException(status_code=422, detail="question is required")
-        include_trace = _debug_trace_enabled(debug)
+        include_trace = _debug_trace_enabled(debug, request)
 
         try:
             from ai_deney.reports.toy_reports import answer_ask
@@ -268,13 +290,16 @@ def create_app(
 
         response: dict[str, object] = {
             "ok": True,
-            "spec": result["spec"],
             "meta": result["meta"],
             "output": result["output"],
             "content_type": result["content_type"],
         }
-        if include_trace and "trace" in result:
-            response["trace"] = result["trace"]
+        if "plan" in result:
+            response["plan"] = result["plan"]
+        if "spec" in result:
+            response["spec"] = result["spec"]
+        if include_trace:
+            response["trace"] = _sanitize_trace(result.get("trace", {}))
         return response
 
     return app
