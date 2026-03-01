@@ -8,12 +8,32 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from ai_deney.reports.toy_reports import answer_with_metadata
 from tools.toy_hotel_portal.app import create_app
 
 
 def _client_with_tmp_db(tmp_path: Path) -> TestClient:
     app = create_app(repo_root=tmp_path, db_path=tmp_path / "toy.db")
     return TestClient(app)
+
+
+def test_dashboard_contains_ask_panel_controls(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+    for element_id in [
+        "ask-panel",
+        "ask-input",
+        "ask-redact",
+        "ask-format",
+        "ask-submit",
+        "ask-download",
+        "ask-meta",
+        "ask-output",
+        "ask-html-preview",
+    ]:
+        assert f'id="{element_id}"' in html
 
 
 def test_checkin_insert_and_reservations_list(tmp_path: Path) -> None:
@@ -232,14 +252,155 @@ def test_ask_endpoint_returns_deterministic_sales_report(tmp_path: Path) -> None
         json={
             "question": "sales by source channel for March 2025",
             "format": "md",
-            "redact_pii": 1,
+            "redact_pii": True,
         },
     )
     assert ask_res.status_code == 200
     body = ask_res.json()
+    assert set(body.keys()) == {"ok", "spec", "meta", "output", "content_type"}
     assert body["ok"] is True
-    assert body["format"] == "md"
-    assert body["spec"]["query_type"] == "sales_month"
-    assert body["spec"]["group_by"] == "source_channel"
-    assert "| source_channel | reservations | total_sales |" in body["report"]
-    assert "total_sales: 390.00" in body["report"]
+    assert body["content_type"] == "text/markdown"
+    assert isinstance(body["output"], str) and body["output"]
+    assert body["spec"]["report_type"] == "sales_by_channel"
+    assert body["spec"]["group_by"] == "channel"
+    assert body["meta"]["report_type"] == "sales_by_channel"
+    assert "| channel | reservations | total_sales |" in body["output"]
+    assert "total_sales: 390.00" in body["output"]
+
+
+def test_ask_endpoint_rejects_integer_redact_pii(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    ask_res = client.post(
+        "/api/ask",
+        json={
+            "question": "sales by channel for March 2025",
+            "format": "md",
+            "redact_pii": 1,
+        },
+    )
+    assert ask_res.status_code == 422
+
+
+def test_ask_endpoint_matches_shared_answer_pipeline(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    payload = {
+        "guest_name": "Alice A",
+        "check_in": "2025-03-05",
+        "check_out": "2025-03-07",
+        "room_type": "Deluxe",
+        "adults": 2,
+        "children": 0,
+        "source_channel": "booking",
+        "nightly_rate": 120.00,
+        "total_paid": 240.00,
+        "currency": "USD",
+    }
+    assert client.post("/api/checkin", json=payload).status_code == 200
+    payload["guest_name"] = "Bob B"
+    payload["check_in"] = "2025-03-18"
+    payload["check_out"] = "2025-03-19"
+    payload["source_channel"] = "direct"
+    payload["total_paid"] = 150.00
+    assert client.post("/api/checkin", json=payload).status_code == 200
+
+    question = "Sales by channel for March 2025"
+    ask_res = client.post("/api/ask", json={"question": question, "format": "md", "redact_pii": True})
+    assert ask_res.status_code == 200
+    body = ask_res.json()
+
+    expected = answer_with_metadata(
+        question,
+        db_path=client.app.state.db_path,
+        output_format="markdown",
+        redact_pii=True,
+    )
+
+    api_report = str(body["output"])
+    expected_report = str(expected["report"])
+    assert api_report.splitlines()[0] == expected_report.splitlines()[0]
+    assert "| channel | reservations | total_sales |" in api_report
+    assert "| channel | reservations | total_sales |" in expected_report
+    assert "total_sales: 390.00" in api_report
+    assert "total_sales: 390.00" in expected_report
+    assert body["spec"]["report_type"] == expected["spec"]["report_type"]
+
+
+def test_ask_endpoint_html_returns_html_content_type(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    payload = {
+        "guest_name": "Html Guest",
+        "check_in": "2025-03-05",
+        "check_out": "2025-03-06",
+        "room_type": "Deluxe",
+        "adults": 2,
+        "children": 0,
+        "source_channel": "direct",
+        "nightly_rate": 100.00,
+        "total_paid": 100.00,
+        "currency": "USD",
+    }
+    assert client.post("/api/checkin", json=payload).status_code == 200
+
+    ask_res = client.post(
+        "/api/ask",
+        json={"question": "sales for March 2025", "format": "html", "redact_pii": True},
+    )
+    assert ask_res.status_code == 200
+    body = ask_res.json()
+    assert body["content_type"] == "text/html"
+    assert "<!doctype html>" in body["output"].lower()
+
+
+def test_ask_endpoint_html_escapes_question_script_input(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    payload = {
+        "guest_name": "Safe Guest",
+        "check_in": "2025-03-05",
+        "check_out": "2025-03-06",
+        "room_type": "Deluxe",
+        "adults": 2,
+        "children": 0,
+        "source_channel": "direct",
+        "nightly_rate": 110.00,
+        "total_paid": 110.00,
+        "currency": "USD",
+    }
+    assert client.post("/api/checkin", json=payload).status_code == 200
+
+    question = "Sales by channel for March 2025 <script>alert(1)</script>"
+    ask_res = client.post(
+        "/api/ask",
+        json={"question": question, "format": "html", "redact_pii": True},
+    )
+    assert ask_res.status_code == 200
+    body = ask_res.json()
+    assert "<script>alert(1)</script>" not in body["output"]
+    assert "&lt;script&gt;" not in body["output"]
+
+
+def test_ask_endpoint_same_question_same_output(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    payload = {
+        "guest_name": "Alice A",
+        "check_in": "2025-03-05",
+        "check_out": "2025-03-07",
+        "room_type": "Deluxe",
+        "adults": 2,
+        "children": 0,
+        "source_channel": "booking",
+        "nightly_rate": 120.00,
+        "total_paid": 240.00,
+        "currency": "USD",
+    }
+    assert client.post("/api/checkin", json=payload).status_code == 200
+
+    req = {"question": "Sales by channel for March 2025", "format": "md", "redact_pii": True}
+    first = client.post("/api/ask", json=req)
+    second = client.post("/api/ask", json=req)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_body = first.json()
+    second_body = second.json()
+    assert first_body["output"] == second_body["output"]
+    assert first_body["spec"] == second_body["spec"]
+    assert first_body["meta"] == second_body["meta"]

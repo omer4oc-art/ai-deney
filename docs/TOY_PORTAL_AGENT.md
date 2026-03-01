@@ -42,6 +42,12 @@ Optional DB override:
 python3 scripts/ask_alice.py "sales for March 2025" --db data/toy_portal/toy.db --out outputs/_ask/march_sales.md
 ```
 
+Parser mode details (deterministic vs llm stub):
+
+```bash
+cat docs/TOY_AGENT_MODE.md
+```
+
 ## 3) Run Integration Tests
 
 Integration tests are marked and may skip if optional dependencies are missing:

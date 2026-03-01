@@ -85,6 +85,7 @@ docs/*
 !docs/PORTAL_E2E.md
 !docs/VIEWER_UI.md
 !docs/TOY_PORTAL_AGENT.md
+!docs/TOY_AGENT_MODE.md
 outputs/
 
 # inbox drop-folder payloads (never commit real exports)

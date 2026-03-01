@@ -3,6 +3,10 @@
 
   var debugMode = window.location.search.indexOf("debug=1") !== -1;
   var warnedEmptyOccupancy = false;
+  var lastAskOutput = "";
+  var lastAskFormat = "md";
+  var lastAskContentType = "text/markdown";
+  var lastAskQuestion = "";
 
   function byId(id) {
     return document.getElementById(id);
@@ -239,6 +243,99 @@
     }
   }
 
+  function setAskStatus(message) {
+    var status = byId("ask-status");
+    if (status) {
+      status.textContent = String(message || "");
+    }
+  }
+
+  function renderAskOutput(output, format, contentType) {
+    var askOutputText = byId("ask-output-text");
+    var askOutputHtml = byId("ask-html-preview");
+    var outputText = String(output || "");
+    var isHtml = String(format || "") === "html" || String(contentType || "") === "text/html";
+
+    if (askOutputText) {
+      askOutputText.classList.toggle("hidden", isHtml);
+    }
+    if (askOutputHtml) {
+      askOutputHtml.classList.toggle("hidden", !isHtml);
+    }
+
+    if (isHtml && askOutputHtml) {
+      askOutputHtml.srcdoc = outputText;
+    } else if (askOutputText) {
+      // Markdown is rendered as plain text when no markdown renderer is available.
+      askOutputText.textContent = outputText;
+    }
+  }
+
+  function setAskBusy(isBusy) {
+    var askSubmit = byId("ask-submit");
+    var askDownload = byId("ask-download");
+    if (askSubmit) {
+      askSubmit.disabled = Boolean(isBusy);
+      askSubmit.textContent = isBusy ? "Running... ⏳" : "Ask";
+    }
+    if (askDownload) {
+      askDownload.disabled = Boolean(isBusy) || !lastAskOutput;
+    }
+  }
+
+  function downloadAskOutput() {
+    if (!lastAskOutput) {
+      return;
+    }
+    var ext = lastAskFormat === "html" ? "html" : "md";
+    var filename = buildAskFilename(lastAskQuestion, ext);
+    var blob = new Blob([lastAskOutput], { type: lastAskContentType || "text/plain" });
+    var downloadUrl = window.URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(downloadUrl);
+  }
+
+  function hashText(text) {
+    var h = 5381;
+    var s = String(text || "");
+    for (var i = 0; i < s.length; i += 1) {
+      h = ((h << 5) + h) ^ s.charCodeAt(i);
+      h = h >>> 0;
+    }
+    return h.toString(16);
+  }
+
+  function slugifyText(text) {
+    var s = String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!s) {
+      return "ask";
+    }
+    return s.slice(0, 40);
+  }
+
+  function buildAskFilename(question, ext) {
+    return "ask_" + slugifyText(question) + "_" + hashText(question) + "." + ext;
+  }
+
+  function renderAskMeta(spec, meta) {
+    var askMeta = byId("ask-meta");
+    if (!askMeta) {
+      return;
+    }
+    var reportType = spec && spec.report_type ? String(spec.report_type) : "";
+    var start = meta && meta.start ? String(meta.start) : "";
+    var end = meta && meta.end ? String(meta.end) : "";
+    var range = start && end ? start + ".." + end : "";
+    var totalSales = meta && meta.total_sales != null ? String(Number(meta.total_sales).toFixed(2)) : "";
+    var intentMode = meta && meta.intent_mode ? String(meta.intent_mode) : "";
+    askMeta.textContent = "report_type=" + reportType + "  range=" + range + (totalSales ? "  total_sales=" + totalSales : "") + (intentMode ? "  intent_mode=" + intentMode : "");
+  }
+
   async function refreshDashboard() {
     var startInput = byId("start-date");
     var endInput = byId("end-date");
@@ -271,34 +368,53 @@
 
   async function submitAsk() {
     var askInput = byId("ask-input");
-    var askOutput = byId("ask-output");
     var askFormat = byId("ask-format");
     var askRedact = byId("ask-redact");
-    if (!askInput || !askOutput) {
+    if (!askInput) {
       return;
     }
 
     var question = String(askInput.value || "").trim();
     if (!question) {
-      askOutput.textContent = "Question is required.";
+      setAskStatus("Question is required.");
       return;
     }
 
     var format = askFormat ? String(askFormat.value || "md") : "md";
-    var redactValue = askRedact && askRedact.checked ? 1 : 0;
-    askOutput.textContent = "Running...";
-    var response = await fetchJson("/api/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: question, format: format, redact_pii: redactValue }),
-    });
-    askOutput.textContent = String(response.report || "");
+    var redactValue = Boolean(askRedact && askRedact.checked);
+    lastAskQuestion = question;
+    setAskBusy(true);
+    setAskStatus("Running...");
+    try {
+      var response = await fetchJson("/api/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: question, format: format, redact_pii: redactValue }),
+      });
+      var output = String(response.output || "");
+      var contentType = String(response.content_type || (format === "html" ? "text/html" : "text/markdown"));
+      lastAskOutput = output;
+      lastAskFormat = format;
+      lastAskContentType = contentType;
+      renderAskOutput(output, format, contentType);
+      renderAskMeta(response.spec || {}, response.meta || {});
+      setAskStatus("Done.");
+    } catch (err) {
+      lastAskOutput = "";
+      renderAskMeta({}, {});
+      renderAskOutput("Ask failed: " + err.message, "md", "text/markdown");
+      setAskStatus("Error.");
+      throw err;
+    } finally {
+      setAskBusy(false);
+    }
   }
 
   function initDashboard() {
     var refreshBtn = byId("refresh-btn");
     var exportBtn = byId("export-btn");
     var askBtn = byId("ask-submit");
+    var askDownload = byId("ask-download");
     var askInput = byId("ask-input");
     var askOutput = byId("ask-output");
     if (!refreshBtn || !exportBtn || !byId("occupancy-chart")) {
@@ -323,16 +439,21 @@
     if (askBtn && askInput && askOutput) {
       askBtn.addEventListener("click", function () {
         submitAsk().catch(function (err) {
-          askOutput.textContent = "Ask failed: " + err.message;
+          setAskStatus("Ask failed.");
         });
       });
       askInput.addEventListener("keydown", function (event) {
-        if (event.key === "Enter") {
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
           event.preventDefault();
           submitAsk().catch(function (err) {
-            askOutput.textContent = "Ask failed: " + err.message;
+            setAskStatus("Ask failed.");
           });
         }
+      });
+    }
+    if (askDownload) {
+      askDownload.addEventListener("click", function () {
+        downloadAskOutput();
       });
     }
 

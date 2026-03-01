@@ -1,15 +1,26 @@
-"""Deterministic intent parser for toy portal natural-language sales questions."""
+"""Intent parsing + strict validation for toy portal natural-language questions."""
 
 from __future__ import annotations
 
 import calendar
+import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from typing import Callable, Literal, Mapping
 
-ToyQueryType = Literal["sales_month", "sales_range"]
-ToyGroupBy = Literal["source_channel", "agency"]
+ReportType = Literal[
+    "sales_range",
+    "sales_month",
+    "sales_by_channel",
+    "occupancy_range",
+    "reservations_list",
+    "export_reservations",
+]
+GroupBy = Literal["day", "channel"]
+FormatType = Literal["md", "html"]
+IntentMode = Literal["deterministic", "llm"]
 
 _MONTH_TOKEN_TO_NUMBER = {
     "jan": 1,
@@ -47,130 +58,386 @@ _DATE_RANGE_RE = re.compile(
     r"\b(20\d{2}-\d{2}-\d{2})\b\s*(?:to|through|thru|until|-)\s*\b(20\d{2}-\d{2}-\d{2})\b",
     re.IGNORECASE,
 )
+
+_ALLOWED_KEYS = {
+    "report_type",
+    "start_date",
+    "end_date",
+    "year",
+    "month",
+    "group_by",
+    "redact_pii",
+    "format",
+}
+_RANGE_REQUIRED_REPORTS = {
+    "sales_range",
+    "sales_by_channel",
+    "occupancy_range",
+    "reservations_list",
+    "export_reservations",
+}
+
 _EXAMPLES = [
-    "march 2025 sales data",
-    "sales for March 2025",
-    "sales by source channel for March 2025",
-    "export March 2025 sales redacted",
+    "sales by channel for March 2025",
     "sales from 2025-03-01 to 2025-03-31",
+    "occupancy for March 2025",
+    "list reservations from 2025-03-01 to 2025-03-15",
+    "export reservations for March 2025",
 ]
 
 
 @dataclass(frozen=True)
-class ToyQuerySpec:
-    query_type: ToyQueryType
+class QuerySpec:
+    report_type: ReportType
+    start_date: str | None = None
+    end_date: str | None = None
     year: int | None = None
     month: int | None = None
-    start: date | None = None
-    end: date | None = None
-    group_by: ToyGroupBy | None = None
-    redact_pii: bool = False
-    original_text: str = ""
+    group_by: GroupBy | None = None
+    redact_pii: bool = True
+    format: FormatType = "md"
 
     def resolved_range(self) -> tuple[date, date]:
-        if self.query_type == "sales_range":
-            if self.start is None or self.end is None:
-                raise ValueError("sales_range requires start and end")
-            return self.start, self.end
-        if self.year is None or self.month is None:
-            raise ValueError("sales_month requires year and month")
-        first = date(self.year, self.month, 1)
-        last_day = calendar.monthrange(self.year, self.month)[1]
-        last = date(self.year, self.month, last_day)
-        return first, last
+        if self.start_date is None or self.end_date is None:
+            raise ValueError("query spec has no resolved start_date/end_date")
+        return _parse_date(self.start_date), _parse_date(self.end_date)
 
     def to_dict(self) -> dict[str, object]:
-        start, end = self.resolved_range()
         return {
-            "query_type": self.query_type,
+            "report_type": self.report_type,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
             "year": self.year,
             "month": self.month,
-            "start": start.isoformat(),
-            "end": end.isoformat(),
             "group_by": self.group_by,
             "redact_pii": self.redact_pii,
-            "original_text": self.original_text,
+            "format": self.format,
         }
 
 
-def _parse_date(text: str) -> date:
+ToyQuerySpec = QuerySpec
+
+
+@dataclass(frozen=True)
+class ToyParseResult:
+    spec: QuerySpec
+    raw_llm_json: dict[str, object] | None
+    intent_mode: IntentMode
+
+
+ToyLLMRouter = Callable[[str], Mapping[str, object] | str]
+
+
+def resolve_intent_mode(intent_mode: str | None = None) -> IntentMode:
+    raw = (intent_mode or os.getenv("AI_DENEY_TOY_INTENT_MODE", "deterministic")).strip().lower()
+    if raw in {"", "deterministic"}:
+        return "deterministic"
+    if raw == "llm":
+        return "llm"
+    raise ValueError("AI_DENEY_TOY_INTENT_MODE must be 'deterministic' or 'llm'")
+
+
+def _parse_date(value: str) -> date:
     try:
-        return date.fromisoformat(str(text))
+        return date.fromisoformat(str(value))
     except Exception as exc:
-        raise ValueError(f"invalid date: {text!r}, expected YYYY-MM-DD") from exc
+        raise ValueError(f"invalid date: {value!r}, expected YYYY-MM-DD") from exc
 
 
-def _extract_group_by(lowered: str) -> ToyGroupBy | None:
-    if "source channel" in lowered or "by source" in lowered or "by channel" in lowered:
-        return "source_channel"
-    if "by agency" in lowered or "by agencies" in lowered:
-        return "agency"
+def _month_range(year: int, month: int) -> tuple[str, str]:
+    first = date(year, month, 1)
+    last_day = calendar.monthrange(year, month)[1]
+    last = date(year, month, last_day)
+    return first.isoformat(), last.isoformat()
+
+
+def _extract_month_year(text: str) -> tuple[int | None, int | None]:
+    month_match = _MONTH_YEAR_RE.search(text)
+    if month_match:
+        token = month_match.group(1).strip().lower()
+        month = _MONTH_TOKEN_TO_NUMBER.get(token)
+        if month is None:
+            raise ValueError(f"unsupported month token: {token!r}")
+        return int(month_match.group(2)), month
+
+    year_month_match = _YEAR_MONTH_RE.search(text)
+    if year_month_match:
+        return int(year_month_match.group(1)), int(year_month_match.group(2))
+
+    return None, None
+
+
+def _extract_group_by(lowered: str) -> GroupBy | None:
+    if "by channel" in lowered or "by source channel" in lowered or "channel breakdown" in lowered:
+        return "channel"
+    if "by day" in lowered or "daily" in lowered:
+        return "day"
     return None
 
 
 def _extract_redact(lowered: str) -> bool:
-    return ("redact" in lowered) or ("redacted" in lowered)
+    if "without redaction" in lowered or "unredacted" in lowered or "redact off" in lowered:
+        return False
+    if "redact" in lowered:
+        return True
+    return True
 
 
-def parse_toy_query(text: str) -> ToyQuerySpec:
-    """Deterministically parse toy sales questions into a structured ToyQuerySpec."""
+def _extract_format(lowered: str) -> FormatType:
+    if " html" in f" {lowered}" or lowered.endswith("html"):
+        return "html"
+    return "md"
 
+
+def _deterministic_candidate(text: str) -> dict[str, object]:
     cleaned = str(text or "").strip()
     if not cleaned:
         raise ValueError("query text cannot be empty")
 
     lowered = cleaned.lower()
-    if "sales" not in lowered:
-        raise ValueError(
-            "Unsupported query. This interface only supports sales questions. "
-            f"Examples: {', '.join(_EXAMPLES)}"
-        )
-
+    date_range_match = _DATE_RANGE_RE.search(cleaned)
+    year, month = _extract_month_year(cleaned)
     group_by = _extract_group_by(lowered)
-    redact_pii = _extract_redact(lowered)
 
-    range_match = _DATE_RANGE_RE.search(cleaned)
-    if range_match:
-        start = _parse_date(range_match.group(1))
-        end = _parse_date(range_match.group(2))
-        if end < start:
+    candidate: dict[str, object] = {
+        "report_type": "sales_range",
+        "start_date": None,
+        "end_date": None,
+        "year": year,
+        "month": month,
+        "group_by": group_by,
+        "redact_pii": _extract_redact(lowered),
+        "format": _extract_format(lowered),
+    }
+
+    if date_range_match:
+        candidate["start_date"] = date_range_match.group(1)
+        candidate["end_date"] = date_range_match.group(2)
+
+    if "occupancy" in lowered:
+        candidate["report_type"] = "occupancy_range"
+        if candidate["group_by"] is None:
+            candidate["group_by"] = "day"
+        return candidate
+
+    if "export" in lowered and "reservation" in lowered:
+        candidate["report_type"] = "export_reservations"
+        return candidate
+
+    if ("list reservation" in lowered) or ("reservations list" in lowered) or lowered.startswith("reservations"):
+        candidate["report_type"] = "reservations_list"
+        return candidate
+
+    if "sales" in lowered:
+        if "by channel" in lowered or "by source channel" in lowered or "channel breakdown" in lowered:
+            candidate["report_type"] = "sales_by_channel"
+            candidate["group_by"] = "channel"
+            return candidate
+        if date_range_match:
+            candidate["report_type"] = "sales_range"
+            if candidate["group_by"] is None:
+                candidate["group_by"] = "day"
+            return candidate
+        if year is not None and month is not None:
+            candidate["report_type"] = "sales_month"
+            if candidate["group_by"] is None:
+                candidate["group_by"] = "day"
+            return candidate
+        raise ValueError(
+            "Ambiguous sales question. Provide a date range (YYYY-MM-DD to YYYY-MM-DD) "
+            "or a month like March 2025."
+        )
+
+    raise ValueError("Unsupported toy query. Try one of: " + "; ".join(f"'{s}'" for s in _EXAMPLES))
+
+
+def _default_llm_router(question: str) -> Mapping[str, object] | str:
+    from ai_deney.llm.router import route_toy_query_spec
+
+    return route_toy_query_spec(question)
+
+
+def _coerce_router_output(raw: Mapping[str, object] | str) -> dict[str, object]:
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        try:
+            parsed = json.loads(text)
+        except Exception as exc:
+            raise ValueError("LLM router output must be valid JSON object") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM router output must be a JSON object")
+        return {str(k): v for k, v in parsed.items()}
+    raise ValueError("LLM router output must be dict or JSON string")
+
+
+def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text: str = "") -> QuerySpec:
+    if isinstance(spec, QuerySpec):
+        raw: dict[str, object] = spec.to_dict()
+    else:
+        raw = dict(spec)
+
+    unknown = sorted(set(raw.keys()) - _ALLOWED_KEYS)
+    if unknown:
+        raise ValueError(f"QuerySpec contains unsupported fields: {', '.join(unknown)}")
+
+    report_type = str(raw.get("report_type", "")).strip()
+    if report_type not in {
+        "sales_range",
+        "sales_month",
+        "sales_by_channel",
+        "occupancy_range",
+        "reservations_list",
+        "export_reservations",
+    }:
+        raise ValueError(
+            "report_type must be one of sales_range, sales_month, sales_by_channel, "
+            "occupancy_range, reservations_list, export_reservations"
+        )
+
+    group_by_value = raw.get("group_by")
+    if group_by_value in ("", None):
+        group_by: GroupBy | None = None
+    elif group_by_value in {"day", "channel"}:
+        group_by = str(group_by_value)  # type: ignore[assignment]
+    else:
+        raise ValueError("group_by must be one of: day, channel")
+
+    format_value = raw.get("format", "md")
+    if format_value in (None, ""):
+        format_value = "md"
+    if format_value not in {"md", "html"}:
+        raise ValueError("format must be 'md' or 'html'")
+    fmt: FormatType = str(format_value)  # type: ignore[assignment]
+
+    redact_raw = raw.get("redact_pii", True)
+    if isinstance(redact_raw, bool):
+        redact_pii = redact_raw
+    else:
+        raise ValueError("redact_pii must be a boolean")
+
+    start_raw = raw.get("start_date")
+    end_raw = raw.get("end_date")
+    year_raw = raw.get("year")
+    month_raw = raw.get("month")
+
+    start_date: str | None = None
+    end_date: str | None = None
+    year: int | None = None
+    month: int | None = None
+
+    if year_raw not in (None, ""):
+        try:
+            year = int(year_raw)
+        except Exception as exc:
+            raise ValueError("year must be an integer") from exc
+    if month_raw not in (None, ""):
+        try:
+            month = int(month_raw)
+        except Exception as exc:
+            raise ValueError("month must be an integer") from exc
+
+    if year is not None and not (2000 <= year <= 2100):
+        raise ValueError("year must be in range 2000..2100")
+    if month is not None and not (1 <= month <= 12):
+        raise ValueError("month must be in range 1..12")
+    if (year is None) ^ (month is None):
+        raise ValueError("year and month must be provided together")
+
+    if start_raw in (None, "") and end_raw in (None, ""):
+        start_date = None
+        end_date = None
+    elif start_raw in (None, "") or end_raw in (None, ""):
+        raise ValueError("start_date and end_date must be provided together")
+    else:
+        parsed_start = _parse_date(str(start_raw))
+        parsed_end = _parse_date(str(end_raw))
+        if parsed_end < parsed_start:
             raise ValueError("date range end must be >= start")
-        return ToyQuerySpec(
-            query_type="sales_range",
-            start=start,
-            end=end,
-            group_by=group_by,
-            redact_pii=redact_pii,
-            original_text=cleaned,
-        )
+        start_date = parsed_start.isoformat()
+        end_date = parsed_end.isoformat()
 
-    month_match = _MONTH_YEAR_RE.search(cleaned)
-    if month_match:
-        token = month_match.group(1).strip().lower()
-        year = int(month_match.group(2))
-        month = _MONTH_TOKEN_TO_NUMBER.get(token)
-        if month is None:
-            raise ValueError(f"unsupported month token: {token!r}")
-        return ToyQuerySpec(
-            query_type="sales_month",
-            year=year,
-            month=month,
-            group_by=group_by,
-            redact_pii=redact_pii,
-            original_text=cleaned,
-        )
+    if report_type == "sales_month":
+        if year is None or month is None:
+            if start_date and end_date:
+                start_d = _parse_date(start_date)
+                end_d = _parse_date(end_date)
+                expected_start, expected_end = _month_range(start_d.year, start_d.month)
+                if start_date != expected_start or end_date != expected_end:
+                    raise ValueError("sales_month requires year/month or an exact full-month date range")
+                year = start_d.year
+                month = start_d.month
+            else:
+                raise ValueError("sales_month requires year and month")
+        month_start, month_end = _month_range(year, month)
+        if start_date is None:
+            start_date = month_start
+            end_date = month_end
+        elif start_date != month_start or end_date != month_end:
+            raise ValueError("sales_month start_date/end_date must match the provided year/month")
+        if group_by is None:
+            group_by = "day"
 
-    year_month_match = _YEAR_MONTH_RE.search(cleaned)
-    if year_month_match:
-        year = int(year_month_match.group(1))
-        month = int(year_month_match.group(2))
-        return ToyQuerySpec(
-            query_type="sales_month",
-            year=year,
-            month=month,
-            group_by=group_by,
-            redact_pii=redact_pii,
-            original_text=cleaned,
-        )
+    if report_type in _RANGE_REQUIRED_REPORTS:
+        if start_date is None or end_date is None:
+            if year is not None and month is not None:
+                start_date, end_date = _month_range(year, month)
+            else:
+                ctx = f" for query: {question_text!r}" if question_text else ""
+                raise ValueError(
+                    "Ambiguous date range. Provide start_date/end_date or a specific month like March 2025"
+                    + ctx
+                )
+        if report_type == "sales_by_channel":
+            group_by = "channel"
+        elif report_type in {"sales_range", "occupancy_range"} and group_by is None:
+            group_by = "day"
 
-    raise ValueError("Unsupported toy sales query. Try one of: " + "; ".join(f"'{s}'" for s in _EXAMPLES))
+    return QuerySpec(
+        report_type=report_type,  # type: ignore[arg-type]
+        start_date=start_date,
+        end_date=end_date,
+        year=year,
+        month=month,
+        group_by=group_by,
+        redact_pii=redact_pii,
+        format=fmt,
+    )
+
+
+def parse_toy_query_with_trace(
+    text: str,
+    *,
+    intent_mode: str | None = None,
+    llm_router: ToyLLMRouter | None = None,
+) -> ToyParseResult:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        raise ValueError("query text cannot be empty")
+
+    mode = resolve_intent_mode(intent_mode)
+
+    if mode == "deterministic":
+        candidate = _deterministic_candidate(cleaned)
+        spec = validate_query_spec(candidate, question_text=cleaned)
+        return ToyParseResult(spec=spec, raw_llm_json=None, intent_mode="deterministic")
+
+    router = llm_router or _default_llm_router
+    try:
+        raw = router(cleaned)
+    except Exception as exc:
+        raise ValueError(f"llm router failed: {exc}") from exc
+
+    raw_llm_json = _coerce_router_output(raw)
+    spec = validate_query_spec(raw_llm_json, question_text=cleaned)
+    return ToyParseResult(spec=spec, raw_llm_json=raw_llm_json, intent_mode="llm")
+
+
+def parse_toy_query(
+    text: str,
+    *,
+    intent_mode: str | None = None,
+    llm_router: ToyLLMRouter | None = None,
+) -> QuerySpec:
+    return parse_toy_query_with_trace(text, intent_mode=intent_mode, llm_router=llm_router).spec

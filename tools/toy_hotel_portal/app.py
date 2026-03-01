@@ -7,11 +7,13 @@ import sqlite3
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Literal
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, StrictBool
 
 from tools.toy_hotel_portal.db import (
     ROOM_COUNT,
@@ -29,6 +31,12 @@ from tools.toy_hotel_portal.db import (
 
 def _repo_root_from_here() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+class AskRequest(BaseModel):
+    question: str
+    format: Literal["md", "html"] = "md"
+    redact_pii: StrictBool = False
 
 
 def _parse_iso_date(value: str, *, field: str) -> date:
@@ -233,37 +241,29 @@ def create_app(
         return Response(content=csv_text, media_type="text/csv", headers=headers)
 
     @app.post("/api/ask")
-    async def api_ask(request: Request) -> dict[str, object]:
-        payload = await _load_payload(request)
-        question = _parse_nonempty_str(payload, "question")
-        raw_format = _parse_optional_str(payload, "format", default="md").lower() or "md"
-        if raw_format not in {"md", "html"}:
-            raise HTTPException(status_code=422, detail="format must be 'md' or 'html'")
-
-        redact_pii = _parse_int(payload, "redact_pii", default=0, min_value=0)
-        if redact_pii not in {0, 1}:
-            raise HTTPException(status_code=422, detail="redact_pii must be 0 or 1")
+    async def api_ask(payload: AskRequest) -> dict[str, object]:
+        question = payload.question.strip()
+        if not question:
+            raise HTTPException(status_code=422, detail="question is required")
 
         try:
-            from ai_deney.reports.toy_reports import answer_with_metadata
+            from ai_deney.reports.toy_reports import answer_ask
 
-            result = answer_with_metadata(
+            result = answer_ask(
                 question,
+                format=payload.format,
                 db_path=app.state.db_path,
-                output_format="markdown" if raw_format == "md" else "html",
-                redact_pii=bool(redact_pii),
+                redact_pii=bool(payload.redact_pii),
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         return {
             "ok": True,
-            "question": question,
-            "format": raw_format,
-            "redact_pii": int(redact_pii),
-            "report": result["report"],
             "spec": result["spec"],
-            "metadata": result["metadata"],
+            "meta": result["meta"],
+            "output": result["output"],
+            "content_type": result["content_type"],
         }
 
     return app

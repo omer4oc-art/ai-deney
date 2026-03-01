@@ -1,0 +1,8 @@
+{
+  "report_type":"sales_by_channel",
+  "year":2025,
+  "month":3,
+  "group_by":"channel",
+  "format":"md",
+  "redact_pii":true
+}

@@ -146,27 +146,35 @@
 </template>
 </div>
 </div>
-<div class="bg-white dark:bg-slate-800 p-6 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+<div class="bg-white dark:bg-slate-800 p-6 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm space-y-4" id="ask-panel">
 <div class="flex items-center justify-between gap-3">
 <div>
 <h3 class="text-lg font-bold">Ask Alice</h3>
-<p class="text-sm text-slate-500 dark:text-slate-400">Ask deterministic sales questions (no LLM).</p>
+<p class="text-sm text-slate-500 dark:text-slate-400">Ask deterministic portal questions from the dashboard.</p>
 </div>
 <span class="px-2 py-1 bg-slate-100 dark:bg-slate-700 text-[10px] font-mono text-slate-500 dark:text-slate-400 rounded">POST /api/ask</span>
 </div>
-<div class="flex flex-col md:flex-row gap-3">
-<input class="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm" id="ask-input" placeholder="march 2025 sales data" type="text" value="march 2025 sales data"/>
+<div class="space-y-3">
+<textarea class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm min-h-[88px]" id="ask-input" placeholder="Sales by channel for March 2025">Sales by channel for March 2025</textarea>
+<div class="flex flex-col md:flex-row md:items-center gap-3">
 <select class="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm" id="ask-format">
 <option value="md">Markdown</option>
 <option value="html">HTML</option>
 </select>
 <label class="inline-flex items-center gap-2 px-2 text-xs text-slate-600 dark:text-slate-300">
-<input id="ask-redact" type="checkbox"/>
+<input checked="" id="ask-redact" type="checkbox"/>
 <span>Redact</span>
 </label>
 <button class="px-4 py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition-colors" id="ask-submit" type="button">Ask</button>
+<button class="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-100 text-sm font-semibold hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors disabled:opacity-50" disabled="" id="ask-download" type="button">Download</button>
 </div>
-<pre class="min-h-[120px] max-h-[280px] overflow-auto rounded-lg bg-slate-900 text-slate-100 text-xs p-3 whitespace-pre-wrap" id="ask-output">Ask a question and click Ask.</pre>
+<p class="text-xs text-slate-500 dark:text-slate-400" id="ask-status">Ready.</p>
+<div class="text-xs text-slate-500 dark:text-slate-400 whitespace-pre-wrap" id="ask-meta"></div>
+</div>
+<div class="min-h-[120px] max-h-[360px] overflow-auto rounded-lg bg-slate-900 text-slate-100 text-xs p-3" id="ask-output">
+<pre class="whitespace-pre-wrap" id="ask-output-text">Ask a question and click Ask.</pre>
+<iframe class="hidden w-full min-h-[300px] rounded bg-white" id="ask-html-preview" sandbox="allow-same-origin"></iframe>
+</div>
 </div>
 <div class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
 <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700 flex justify-between items-center">
