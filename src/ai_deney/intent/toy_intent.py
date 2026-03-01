@@ -55,7 +55,7 @@ _MONTH_NAMES_REGEX = (
     r"jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
 )
 _MONTH_YEAR_RE = re.compile(rf"\b({_MONTH_NAMES_REGEX})\b[\s,/-]*(20\d{{2}})\b", re.IGNORECASE)
-_YEAR_MONTH_RE = re.compile(r"\b(20\d{2})-(0[1-9]|1[0-2])\b")
+_YEAR_MONTH_RE = re.compile(r"\b(20\d{2})-(0[1-9]|1[0-2])\b(?!-\d{2})")
 _DATE_RANGE_RE = re.compile(
     r"\b(20\d{2}-\d{2}-\d{2})\b\s*(?:to|through|thru|until|-)\s*\b(20\d{2}-\d{2}-\d{2})\b",
     re.IGNORECASE,
@@ -75,6 +75,7 @@ _ALLOWED_KEYS = {
     "month",
     "group_by",
     "dates",
+    "spans",
     "compare",
     "redact_pii",
     "format",
@@ -90,12 +91,28 @@ _RANGE_REQUIRED_REPORTS = {
 _EXAMPLES = [
     "sales by channel for March 2025",
     "sales from 2025-03-01 to 2025-03-31",
-    "total sales on 2025-03-01 and 2025-06-03",
+    "total sales on March 1st 2025 and June 3rd 2025",
+    "compare March 2025 vs June 2025 sales",
+    "sales from 2025-03-01 to 2025-03-07 and 2025-06-01 to 2025-06-07",
     "compare March 1 vs June 3",
     "occupancy for March 2025",
     "list reservations from 2025-03-01 to 2025-03-15",
     "export reservations for March 2025",
 ]
+
+
+@dataclass(frozen=True)
+class QuerySpan:
+    start_date: str
+    end_date: str
+    label: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "label": self.label,
+        }
 
 
 @dataclass(frozen=True)
@@ -107,6 +124,7 @@ class QuerySpec:
     month: int | None = None
     group_by: GroupBy | None = None
     dates: tuple[str, ...] = ()
+    spans: tuple[QuerySpan, ...] = ()
     compare: bool = False
     redact_pii: bool = True
     format: FormatType = "md"
@@ -114,6 +132,8 @@ class QuerySpec:
     def resolved_range(self) -> tuple[date, date]:
         if self.start_date is not None and self.end_date is not None:
             return _parse_date(self.start_date), _parse_date(self.end_date)
+        if self.spans:
+            return _parse_date(self.spans[0].start_date), _parse_date(self.spans[-1].end_date)
         if self.report_type == "sales_for_dates" and self.dates:
             return _parse_date(self.dates[0]), _parse_date(self.dates[-1])
         raise ValueError("query spec has no resolved start_date/end_date")
@@ -127,6 +147,7 @@ class QuerySpec:
             "month": self.month,
             "group_by": self.group_by,
             "dates": list(self.dates),
+            "spans": [span.to_dict() for span in self.spans],
             "compare": self.compare,
             "redact_pii": self.redact_pii,
             "format": self.format,
@@ -222,16 +243,22 @@ def _extract_compare(lowered: str) -> bool:
     return bool(_COMPARE_RE.search(lowered))
 
 
-def _extract_date_points(text: str) -> tuple[list[str], list[str]]:
+def _default_span_label(start_date: str, end_date: str) -> str:
+    if start_date == end_date:
+        return start_date
+    return f"{start_date}..{end_date}"
+
+
+def _extract_date_points_in_order(text: str) -> tuple[list[str], list[str]]:
     warnings: list[str] = []
-    dates: set[str] = set()
+    collected: list[tuple[int, str]] = []
 
     for match in _ISO_DATE_RE.finditer(text):
         iso = match.group(1)
         parsed = _parse_date(iso)
-        dates.add(parsed.isoformat())
+        collected.append((int(match.start()), parsed.isoformat()))
 
-    month_day_tokens: list[tuple[int, int, int | None]] = []
+    month_day_tokens: list[tuple[int, int, int | None, int]] = []
     explicit_years: set[int] = set()
     for match in _MONTH_DAY_RE.finditer(text):
         token = str(match.group(1)).strip().lower()
@@ -242,11 +269,11 @@ def _extract_date_points(text: str) -> tuple[list[str], list[str]]:
         year_val = int(match.group(3)) if match.group(3) else None
         if year_val is not None:
             explicit_years.add(year_val)
-        month_day_tokens.append((month, day, year_val))
+        month_day_tokens.append((month, day, year_val, int(match.start())))
 
     inferred_year: int | None = next(iter(explicit_years)) if len(explicit_years) == 1 else None
     used_default_year = False
-    for month, day, year_val in month_day_tokens:
+    for month, day, year_val, start_pos in month_day_tokens:
         year = year_val
         if year is None:
             if inferred_year is not None:
@@ -258,12 +285,90 @@ def _extract_date_points(text: str) -> tuple[list[str], list[str]]:
             parsed = date(year, month, day)
         except Exception as exc:
             raise ValueError(f"invalid month/day date: {month:02d}-{day:02d} ({year})") from exc
-        dates.add(parsed.isoformat())
+        collected.append((start_pos, parsed.isoformat()))
 
     if used_default_year:
         warnings.append("Year omitted for one or more month/day dates; defaulted to 2025.")
 
-    return sorted(dates), warnings
+    collected.sort(key=lambda item: item[0])
+    ordered_unique: list[str] = []
+    seen: set[str] = set()
+    for _pos, iso in collected:
+        if iso in seen:
+            continue
+        ordered_unique.append(iso)
+        seen.add(iso)
+    return ordered_unique, warnings
+
+
+def _extract_date_points(text: str) -> tuple[list[str], list[str]]:
+    points, warnings = _extract_date_points_in_order(text)
+    return sorted(points), warnings
+
+
+def _extract_multi_range_spans(text: str) -> list[dict[str, str]]:
+    spans: list[dict[str, str]] = []
+    for match in _DATE_RANGE_RE.finditer(text):
+        parsed_start = _parse_date(match.group(1))
+        parsed_end = _parse_date(match.group(2))
+        if parsed_end < parsed_start:
+            raise ValueError("date range end must be >= start")
+        start_iso = parsed_start.isoformat()
+        end_iso = parsed_end.isoformat()
+        spans.append(
+            {
+                "start_date": start_iso,
+                "end_date": end_iso,
+                "label": _default_span_label(start_iso, end_iso),
+            }
+        )
+    return spans
+
+
+def _extract_month_spans(text: str) -> list[dict[str, str]]:
+    matches: list[tuple[int, str, str, str]] = []
+    for match in _MONTH_YEAR_RE.finditer(text):
+        token = str(match.group(1)).strip().lower()
+        month = _MONTH_TOKEN_TO_NUMBER.get(token)
+        if month is None:
+            continue
+        year = int(match.group(2))
+        start_iso, end_iso = _month_range(year, month)
+        label = date(year, month, 1).strftime("%B %Y")
+        matches.append((int(match.start()), start_iso, end_iso, label))
+
+    for match in _YEAR_MONTH_RE.finditer(text):
+        year = int(match.group(1))
+        month = int(match.group(2))
+        start_iso, end_iso = _month_range(year, month)
+        label = date(year, month, 1).strftime("%B %Y")
+        matches.append((int(match.start()), start_iso, end_iso, label))
+
+    matches.sort(key=lambda item: item[0])
+    spans: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for _pos, start_iso, end_iso, label in matches:
+        key = (start_iso, end_iso)
+        if key in seen:
+            continue
+        spans.append(
+            {
+                "start_date": start_iso,
+                "end_date": end_iso,
+                "label": label,
+            }
+        )
+        seen.add(key)
+    return spans
+
+
+def _supported_multi_span_patterns_message() -> str:
+    return (
+        "Unable to parse multi-span sales request. Supported patterns: "
+        "'total sales on March 1st 2025 and June 3rd 2025'; "
+        "'compare March 2025 vs June 2025 sales'; "
+        "'sales from 2025-03-01 to 2025-03-07 and 2025-06-01 to 2025-06-07'."
+    )
 
 
 def _deterministic_candidate(text: str) -> tuple[dict[str, object], list[str]]:
@@ -273,10 +378,21 @@ def _deterministic_candidate(text: str) -> tuple[dict[str, object], list[str]]:
 
     lowered = cleaned.lower()
     date_range_match = _DATE_RANGE_RE.search(cleaned)
+    date_range_spans = _extract_multi_range_spans(cleaned)
+    month_spans = _extract_month_spans(cleaned)
     year, month = _extract_month_year(cleaned)
     group_by = _extract_group_by(lowered)
     compare = _extract_compare(lowered)
-    date_points, warnings = _extract_date_points(cleaned)
+    date_points, warnings = _extract_date_points_in_order(cleaned)
+    has_multi_hint = bool(compare or " vs " in f" {lowered} " or " and " in f" {lowered} ")
+    spans_for_date_points = [
+        {
+            "start_date": day,
+            "end_date": day,
+            "label": day,
+        }
+        for day in date_points
+    ]
 
     candidate: dict[str, object] = {
         "report_type": "sales_range",
@@ -286,6 +402,7 @@ def _deterministic_candidate(text: str) -> tuple[dict[str, object], list[str]]:
         "month": month,
         "group_by": group_by,
         "dates": [],
+        "spans": [],
         "compare": compare,
         "redact_pii": _extract_redact(lowered),
         "format": _extract_format(lowered),
@@ -309,19 +426,84 @@ def _deterministic_candidate(text: str) -> tuple[dict[str, object], list[str]]:
         candidate["report_type"] = "reservations_list"
         return candidate, warnings
 
-    if compare and len(date_points) >= 2:
-        candidate["report_type"] = "sales_for_dates"
-        candidate["dates"] = date_points
-        candidate["compare"] = True
-        candidate["group_by"] = None
-        candidate["start_date"] = None
-        candidate["end_date"] = None
-        return candidate, warnings
+    if compare:
+        if len(month_spans) >= 2:
+            candidate["report_type"] = "sales_month"
+            candidate["spans"] = month_spans
+            candidate["start_date"] = month_spans[0]["start_date"]
+            candidate["end_date"] = month_spans[-1]["end_date"]
+            candidate["group_by"] = "day"
+            candidate["compare"] = True
+            return candidate, warnings
+        if len(date_range_spans) >= 2:
+            candidate["report_type"] = "sales_range"
+            candidate["spans"] = date_range_spans
+            candidate["start_date"] = date_range_spans[0]["start_date"]
+            candidate["end_date"] = date_range_spans[-1]["end_date"]
+            if candidate["group_by"] is None:
+                candidate["group_by"] = "day"
+            candidate["compare"] = True
+            return candidate, warnings
+        if len(spans_for_date_points) >= 2:
+            candidate["report_type"] = "sales_day"
+            candidate["spans"] = spans_for_date_points
+            candidate["start_date"] = spans_for_date_points[0]["start_date"]
+            candidate["end_date"] = spans_for_date_points[-1]["end_date"]
+            candidate["group_by"] = None
+            candidate["compare"] = True
+            return candidate, warnings
 
     if "sales" in lowered:
         if "by channel" in lowered or "by source channel" in lowered or "channel breakdown" in lowered:
             candidate["report_type"] = "sales_by_channel"
             candidate["group_by"] = "channel"
+            if len(date_range_spans) >= 2:
+                candidate["spans"] = date_range_spans
+                candidate["start_date"] = date_range_spans[0]["start_date"]
+                candidate["end_date"] = date_range_spans[-1]["end_date"]
+                candidate["compare"] = True
+                return candidate, warnings
+            if len(month_spans) >= 2:
+                candidate["spans"] = month_spans
+                candidate["start_date"] = month_spans[0]["start_date"]
+                candidate["end_date"] = month_spans[-1]["end_date"]
+                candidate["compare"] = True
+                return candidate, warnings
+            if len(spans_for_date_points) >= 2 and has_multi_hint:
+                candidate["spans"] = spans_for_date_points
+                candidate["start_date"] = spans_for_date_points[0]["start_date"]
+                candidate["end_date"] = spans_for_date_points[-1]["end_date"]
+                candidate["compare"] = True
+                return candidate, warnings
+            return candidate, warnings
+
+        if len(date_range_spans) >= 2:
+            candidate["report_type"] = "sales_range"
+            candidate["spans"] = date_range_spans
+            candidate["start_date"] = date_range_spans[0]["start_date"]
+            candidate["end_date"] = date_range_spans[-1]["end_date"]
+            if candidate["group_by"] is None:
+                candidate["group_by"] = "day"
+            candidate["compare"] = True
+            return candidate, warnings
+
+        if len(month_spans) >= 2 and has_multi_hint:
+            candidate["report_type"] = "sales_month"
+            candidate["spans"] = month_spans
+            candidate["start_date"] = month_spans[0]["start_date"]
+            candidate["end_date"] = month_spans[-1]["end_date"]
+            if candidate["group_by"] is None:
+                candidate["group_by"] = "day"
+            candidate["compare"] = True
+            return candidate, warnings
+
+        if len(spans_for_date_points) >= 2 and (has_multi_hint or " on " in f" {lowered}"):
+            candidate["report_type"] = "sales_day"
+            candidate["spans"] = spans_for_date_points
+            candidate["start_date"] = spans_for_date_points[0]["start_date"]
+            candidate["end_date"] = spans_for_date_points[-1]["end_date"]
+            candidate["group_by"] = None
+            candidate["compare"] = True
             return candidate, warnings
 
         if date_range_match:
@@ -330,14 +512,15 @@ def _deterministic_candidate(text: str) -> tuple[dict[str, object], list[str]]:
                 candidate["group_by"] = "day"
             return candidate, warnings
 
-        if date_points and (len(date_points) >= 2 or " on " in f" {lowered}"):
-            candidate["report_type"] = "sales_for_dates"
-            candidate["dates"] = date_points
-            candidate["compare"] = compare
+        if date_points and (" on " in f" {lowered}"):
+            candidate["report_type"] = "sales_day"
+            candidate["start_date"] = date_points[0]
+            candidate["end_date"] = date_points[0]
             candidate["group_by"] = None
-            candidate["start_date"] = None
-            candidate["end_date"] = None
             return candidate, warnings
+
+        if compare and has_multi_hint:
+            raise ValueError(_supported_multi_span_patterns_message())
 
         if year is not None and month is not None:
             candidate["report_type"] = "sales_month"
@@ -345,10 +528,20 @@ def _deterministic_candidate(text: str) -> tuple[dict[str, object], list[str]]:
                 candidate["group_by"] = "day"
             return candidate, warnings
 
+        if has_multi_hint:
+            raise ValueError(_supported_multi_span_patterns_message())
+
         raise ValueError(
             "Ambiguous sales question. Provide a date range (YYYY-MM-DD to YYYY-MM-DD), "
             "specific dates (for example March 1 and June 3), or a month like March 2025."
         )
+
+    if has_multi_hint and (
+        len(month_spans) == 1
+        or len(date_range_spans) == 1
+        or len(spans_for_date_points) == 1
+    ):
+        raise ValueError(_supported_multi_span_patterns_message())
 
     raise ValueError("Unsupported toy query. Try one of: " + "; ".join(f"'{s}'" for s in _EXAMPLES))
 
@@ -370,8 +563,11 @@ def _llm_stub_source() -> str:
 def _deterministic_rule_trace(text: str, candidate: Mapping[str, object]) -> tuple[str, list[str]]:
     lowered = text.lower()
     matched: list[str] = []
-    if _DATE_RANGE_RE.search(text):
+    date_range_matches = list(_DATE_RANGE_RE.finditer(text))
+    if date_range_matches:
         matched.append("date_range")
+    if len(date_range_matches) >= 2:
+        matched.append("multi_date_range")
     if _MONTH_YEAR_RE.search(text) or _YEAR_MONTH_RE.search(text):
         matched.append("month_year")
     if _ISO_DATE_RE.search(text):
@@ -392,6 +588,7 @@ def _deterministic_rule_trace(text: str, candidate: Mapping[str, object]) -> tup
         matched.append("sales_keyword")
 
     report_type = str(candidate.get("report_type") or "")
+    spans_count = len(list(candidate.get("spans") or []))
     rule_path = "fallback"
     if report_type == "occupancy_range":
         rule_path = "deterministic.occupancy_keyword"
@@ -404,9 +601,16 @@ def _deterministic_rule_trace(text: str, candidate: Mapping[str, object]) -> tup
     elif report_type == "sales_for_dates":
         rule_path = "deterministic.sales.compare_dates" if _COMPARE_RE.search(text) else "deterministic.sales.date_points"
     elif report_type == "sales_month":
-        rule_path = "deterministic.sales.month"
+        rule_path = "deterministic.sales.multi_month" if spans_count >= 2 else "deterministic.sales.month"
     elif report_type == "sales_range":
-        rule_path = "deterministic.sales.date_range" if _DATE_RANGE_RE.search(text) else "deterministic.sales.range"
+        if spans_count >= 2:
+            rule_path = "deterministic.sales.multi_range"
+        else:
+            rule_path = "deterministic.sales.date_range" if _DATE_RANGE_RE.search(text) else "deterministic.sales.range"
+    elif report_type == "sales_day":
+        rule_path = "deterministic.sales.multi_day" if spans_count >= 2 else "deterministic.sales.day"
+    if spans_count >= 2:
+        matched.append("multi_span")
 
     return rule_path, matched
 
@@ -414,6 +618,8 @@ def _deterministic_rule_trace(text: str, candidate: Mapping[str, object]) -> tup
 def _resolved_range_fields(spec: QuerySpec) -> tuple[str | None, str | None]:
     if spec.start_date and spec.end_date:
         return spec.start_date, spec.end_date
+    if spec.spans:
+        return str(spec.spans[0].start_date), str(spec.spans[-1].end_date)
     if spec.report_type == "sales_for_dates" and spec.dates:
         return str(spec.dates[0]), str(spec.dates[-1])
     return None, None
@@ -481,6 +687,7 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
     else:
         raise ValueError("redact_pii must be a boolean")
 
+    compare_provided = "compare" in raw
     compare_raw = raw.get("compare", False)
     if isinstance(compare_raw, bool):
         compare = compare_raw
@@ -499,6 +706,33 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
         parsed_date = _parse_date(item)
         dates_list.append(parsed_date.isoformat())
     dates_list = sorted(set(dates_list))
+
+    spans_raw = raw.get("spans", [])
+    if spans_raw in (None, ""):
+        spans_raw = []
+    if not isinstance(spans_raw, (list, tuple)):
+        raise ValueError("spans must be a list of {start_date,end_date,label} objects")
+    spans_list: list[QuerySpan] = []
+    for idx, item in enumerate(spans_raw):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"spans[{idx}] must be an object")
+        span_dict = dict(item)
+        unknown_span_keys = sorted(set(span_dict.keys()) - {"start_date", "end_date", "label"})
+        if unknown_span_keys:
+            raise ValueError(f"spans[{idx}] has unsupported fields: {', '.join(str(k) for k in unknown_span_keys)}")
+        start_raw_span = span_dict.get("start_date")
+        end_raw_span = span_dict.get("end_date")
+        if start_raw_span in (None, "") or end_raw_span in (None, ""):
+            raise ValueError(f"spans[{idx}] requires start_date and end_date")
+        parsed_start_span = _parse_date(str(start_raw_span))
+        parsed_end_span = _parse_date(str(end_raw_span))
+        if parsed_end_span < parsed_start_span:
+            raise ValueError(f"spans[{idx}] end_date must be >= start_date")
+        start_iso = parsed_start_span.isoformat()
+        end_iso = parsed_end_span.isoformat()
+        raw_label = str(span_dict.get("label", "") or "").strip()
+        label = raw_label or _default_span_label(start_iso, end_iso)
+        spans_list.append(QuerySpan(start_date=start_iso, end_date=end_iso, label=label))
 
     start_raw = raw.get("start_date")
     end_raw = raw.get("end_date")
@@ -541,7 +775,18 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
         start_date = parsed_start.isoformat()
         end_date = parsed_end.isoformat()
 
+    if spans_list and report_type not in {"sales_day", "sales_range", "sales_month", "sales_by_channel"}:
+        raise ValueError("spans is only supported for sales_day, sales_range, sales_month, sales_by_channel")
+
+    if spans_list and dates_list:
+        raise ValueError("spans and dates cannot be used together")
+
+    if spans_list and len(spans_list) >= 2 and not compare_provided:
+        compare = True
+
     if report_type == "sales_for_dates":
+        if spans_list:
+            raise ValueError("sales_for_dates does not support spans")
         if not dates_list:
             raise ValueError("sales_for_dates requires at least one date in dates[]")
         if compare and len(dates_list) < 2:
@@ -551,37 +796,64 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
     elif report_type == "sales_day":
         if dates_list:
             raise ValueError("sales_day does not support dates[]; use start_date/end_date for the day")
-        if start_date is None or end_date is None:
-            raise ValueError("sales_day requires start_date and end_date")
-        if start_date != end_date:
-            raise ValueError("sales_day requires start_date == end_date")
+        if spans_list:
+            for idx, span in enumerate(spans_list):
+                if span.start_date != span.end_date:
+                    raise ValueError(f"sales_day spans[{idx}] requires start_date == end_date")
+            if start_date is None:
+                start_date = spans_list[0].start_date
+            if end_date is None:
+                end_date = spans_list[-1].end_date
+        else:
+            if start_date is None or end_date is None:
+                raise ValueError("sales_day requires start_date and end_date")
+            if start_date != end_date:
+                raise ValueError("sales_day requires start_date == end_date")
         if group_by is not None:
             raise ValueError("sales_day does not support group_by")
     elif dates_list:
         raise ValueError("dates is only supported for report_type=sales_for_dates")
 
     if report_type == "sales_month":
-        if year is None or month is None:
-            if start_date and end_date:
-                start_d = _parse_date(start_date)
-                end_d = _parse_date(end_date)
-                expected_start, expected_end = _month_range(start_d.year, start_d.month)
-                if start_date != expected_start or end_date != expected_end:
-                    raise ValueError("sales_month requires year/month or an exact full-month date range")
-                year = start_d.year
-                month = start_d.month
-            else:
-                raise ValueError("sales_month requires year and month")
-        month_start, month_end = _month_range(year, month)
-        if start_date is None:
-            start_date = month_start
-            end_date = month_end
-        elif start_date != month_start or end_date != month_end:
-            raise ValueError("sales_month start_date/end_date must match the provided year/month")
-        if group_by is None:
-            group_by = "day"
+        if spans_list:
+            for idx, span in enumerate(spans_list):
+                span_start = _parse_date(span.start_date)
+                span_month_start, span_month_end = _month_range(span_start.year, span_start.month)
+                if span.start_date != span_month_start or span.end_date != span_month_end:
+                    raise ValueError("sales_month spans must each match an exact full-month date range")
+            if start_date is None:
+                start_date = spans_list[0].start_date
+            if end_date is None:
+                end_date = spans_list[-1].end_date
+            if group_by is None:
+                group_by = "day"
+        else:
+            if year is None or month is None:
+                if start_date and end_date:
+                    start_d = _parse_date(start_date)
+                    end_d = _parse_date(end_date)
+                    expected_start, expected_end = _month_range(start_d.year, start_d.month)
+                    if start_date != expected_start or end_date != expected_end:
+                        raise ValueError("sales_month requires year/month or an exact full-month date range")
+                    year = start_d.year
+                    month = start_d.month
+                else:
+                    raise ValueError("sales_month requires year and month")
+            month_start, month_end = _month_range(year, month)
+            if start_date is None:
+                start_date = month_start
+                end_date = month_end
+            elif start_date != month_start or end_date != month_end:
+                raise ValueError("sales_month start_date/end_date must match the provided year/month")
+            if group_by is None:
+                group_by = "day"
 
     if report_type in _RANGE_REQUIRED_REPORTS:
+        if spans_list:
+            if start_date is None:
+                start_date = spans_list[0].start_date
+            if end_date is None:
+                end_date = spans_list[-1].end_date
         if start_date is None or end_date is None:
             if year is not None and month is not None:
                 start_date, end_date = _month_range(year, month)
@@ -604,6 +876,7 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
         month=month,
         group_by=group_by,
         dates=tuple(dates_list),
+        spans=tuple(spans_list),
         compare=compare,
         redact_pii=redact_pii,
         format=fmt,
@@ -665,6 +938,7 @@ def parse_toy_query_debug_trace(
                 "year": spec.year,
                 "month": spec.month,
                 "dates": list(spec.dates),
+                "spans": [span.to_dict() for span in spec.spans],
             },
             "chosen": {
                 "report_type": spec.report_type,
@@ -696,6 +970,7 @@ def parse_toy_query_debug_trace(
             "year": spec.year,
             "month": spec.month,
             "dates": list(spec.dates),
+            "spans": [span.to_dict() for span in spec.spans],
         },
         "chosen": {
             "report_type": spec.report_type,
@@ -715,6 +990,7 @@ def _sales_day_spec_from_date(base: QuerySpec, day: str) -> QuerySpec:
         month=None,
         group_by=None,
         dates=(),
+        spans=(),
         compare=False,
         redact_pii=bool(base.redact_pii),
         format=base.format,

@@ -35,6 +35,7 @@ def test_dashboard_contains_ask_panel_controls(tmp_path: Path) -> None:
         "ask-trace",
         "ask-warnings",
         "ask-meta",
+        "ask-spans-count",
         "ask-output",
         "ask-html-preview",
     ]:
@@ -486,7 +487,7 @@ def test_ask_endpoint_same_question_same_output(tmp_path: Path) -> None:
     assert first_body["meta"] == second_body["meta"]
 
 
-def test_ask_sales_for_dates_iso_query(tmp_path: Path) -> None:
+def test_ask_sales_multi_span_iso_query_includes_spans_count_totals_and_deltas(tmp_path: Path) -> None:
     client = _client_with_tmp_db(tmp_path)
     for guest_name, check_in, total_paid in [
         ("Date Guest 1", "2025-03-01", 120.0),
@@ -522,15 +523,68 @@ def test_ask_sales_for_dates_iso_query(tmp_path: Path) -> None:
     )
     assert ask_res.status_code == 200
     body = ask_res.json()
-    assert "spec" not in body
-    assert "plan" in body
-    assert [step["report_type"] for step in body["plan"]] == ["sales_day", "sales_day"]
-    assert [step["start_date"] for step in body["plan"]] == ["2025-03-01", "2025-06-03"]
-    assert body["meta"]["date_count"] == 2
-    assert body["meta"]["totals_by_date_count"] == 2
-    assert body["meta"]["executed_count"] == 2
+    assert "spec" in body
+    assert "plan" not in body
+    assert body["spec"]["report_type"] == "sales_day"
+    assert [span["start_date"] for span in body["spec"]["spans"]] == ["2025-03-01", "2025-06-03"]
+    assert body["spec"]["compare"] is True
+    assert body["meta"]["spans_count"] == 2
+    assert body["meta"]["compare"] is True
+    assert [row["total_sales"] for row in body["meta"]["totals"]] == [200.0, 150.0]
+    assert body["meta"]["deltas"]["delta_total_sales"] == -50.0
+    assert body["meta"]["deltas"]["pct_change_total_sales"] == -25.0
     assert "2025-03-01" in body["output"]
     assert "2025-06-03" in body["output"]
+    assert "| label | start | end | reservations | total_sales |" in body["output"]
+
+
+def test_ask_multi_span_smoke_default_and_debug_trace(tmp_path: Path) -> None:
+    client = _client_with_tmp_db(tmp_path)
+    for guest_name, check_in, total_paid in [
+        ("Smoke Guest 1", "2025-03-01", 100.0),
+        ("Smoke Guest 2", "2025-06-03", 300.0),
+    ]:
+        assert (
+            client.post(
+                "/api/checkin",
+                json={
+                    "guest_name": guest_name,
+                    "check_in": check_in,
+                    "check_out": "2025-06-04" if check_in == "2025-06-03" else "2025-03-02",
+                    "room_type": "Standard",
+                    "adults": 1,
+                    "children": 0,
+                    "source_channel": "direct",
+                    "nightly_rate": total_paid,
+                    "total_paid": total_paid,
+                    "currency": "USD",
+                },
+            ).status_code
+            == 200
+        )
+
+    request_json = {
+        "question": "Total sales on March 1st 2025 and June 3rd 2025",
+        "format": "md",
+        "redact_pii": True,
+    }
+    normal = client.post("/api/ask", json=request_json)
+    assert normal.status_code == 200
+    normal_body = normal.json()
+    assert normal_body["ok"] is True
+    assert normal_body["meta"]["spans_count"] == 2
+    assert len(normal_body["meta"]["totals"]) == 2
+    assert normal_body["spec"]["compare"] is True
+    assert normal_body["meta"]["compare"] is True
+    assert "trace" not in normal_body
+
+    debug = client.post("/api/ask?debug=1", json=request_json)
+    assert debug.status_code == 200
+    debug_body = debug.json()
+    assert debug_body["ok"] is True
+    assert "trace" in debug_body
+    serialized_trace = json.dumps(debug_body["trace"], sort_keys=True).lower()
+    assert "guest_name" not in serialized_trace
 
 
 def test_ask_sales_for_dates_compare_includes_delta_line(tmp_path: Path) -> None:
@@ -564,15 +618,15 @@ def test_ask_sales_for_dates_compare_includes_delta_line(tmp_path: Path) -> None
     )
     assert ask_res.status_code == 200
     body = ask_res.json()
-    assert "spec" not in body
-    assert "plan" in body
-    assert len(body["plan"]) == 2
-    assert body["meta"]["executed_count"] == 2
+    assert "spec" in body
+    assert "plan" not in body
+    assert len(body["spec"]["spans"]) == 2
+    assert body["meta"]["spans_count"] == 2
     assert body["meta"]["compare"] is True
-    assert "delta_total_sales" in body["output"]
-    assert "pct_delta_total_sales" in body["output"]
-    assert "delta_total_sales(2025-06-03 - 2025-03-01): 300.00" in body["output"]
-    assert "pct_delta_total_sales: 150.00%" in body["output"]
+    assert body["meta"]["deltas"]["delta_total_sales"] == 300.0
+    assert body["meta"]["deltas"]["pct_change_total_sales"] == 150.0
+    assert "delta_total_sales(first_to_last): 2025-06-03 - 2025-03-01 = 300.00" in body["output"]
+    assert "pct_change_total_sales(first_to_last): 150.00%" in body["output"]
 
 
 def test_ask_sales_for_dates_missing_year_adds_warning(tmp_path: Path) -> None:
@@ -606,8 +660,8 @@ def test_ask_sales_for_dates_missing_year_adds_warning(tmp_path: Path) -> None:
     )
     assert ask_res.status_code == 200
     body = ask_res.json()
-    assert "spec" not in body
-    assert "plan" in body
+    assert "spec" in body
+    assert "plan" not in body
     assert body["meta"]["warnings"]
     assert any("defaulted to 2025" in str(w) for w in body["meta"]["warnings"])
 

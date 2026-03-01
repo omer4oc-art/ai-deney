@@ -114,32 +114,52 @@ def test_llm_mode_rejects_invalid_router_output() -> None:
         )
 
 
-def test_parse_sales_for_dates_month_name_and_ordinals() -> None:
-    spec = parse_toy_query("total sales on March 1st and June 3rd 2025", intent_mode="deterministic")
-    assert spec.report_type == "sales_for_dates"
-    assert list(spec.dates) == ["2025-03-01", "2025-06-03"]
-    assert spec.compare is False
+def test_parse_multi_span_sales_days_from_month_day_prompt() -> None:
+    spec = parse_toy_query("total sales on March 1st 2025 and June 3rd 2025", intent_mode="deterministic")
+    assert spec.report_type == "sales_day"
+    assert spec.compare is True
+    assert [span.start_date for span in spec.spans] == ["2025-03-01", "2025-06-03"]
+    assert [span.end_date for span in spec.spans] == ["2025-03-01", "2025-06-03"]
 
 
-def test_parse_sales_for_dates_compare_and_default_year_warning() -> None:
+def test_parse_multi_span_sales_month_compare_prompt() -> None:
+    spec = parse_toy_query("compare March 2025 vs June 2025 sales", intent_mode="deterministic")
+    assert spec.report_type == "sales_month"
+    assert spec.compare is True
+    assert [span.label for span in spec.spans] == ["March 2025", "June 2025"]
+    assert [span.start_date for span in spec.spans] == ["2025-03-01", "2025-06-01"]
+    assert [span.end_date for span in spec.spans] == ["2025-03-31", "2025-06-30"]
+
+
+def test_parse_multi_span_sales_ranges_prompt() -> None:
+    spec = parse_toy_query(
+        "sales from 2025-03-01 to 2025-03-07 and 2025-06-01 to 2025-06-07",
+        intent_mode="deterministic",
+    )
+    assert spec.report_type == "sales_range"
+    assert [span.start_date for span in spec.spans] == ["2025-03-01", "2025-06-01"]
+    assert [span.end_date for span in spec.spans] == ["2025-03-07", "2025-06-07"]
+
+
+def test_parse_multi_span_default_year_warning_for_month_day() -> None:
     parsed = parse_toy_query_with_trace("compare March 1 vs June 3", intent_mode="deterministic")
-    assert parsed.spec.report_type == "sales_for_dates"
-    assert list(parsed.spec.dates) == ["2025-03-01", "2025-06-03"]
+    assert parsed.spec.report_type == "sales_day"
+    assert [span.start_date for span in parsed.spec.spans] == ["2025-03-01", "2025-06-03"]
     assert parsed.spec.compare is True
     assert any("defaulted to 2025" in w for w in parsed.warnings)
 
 
-def test_parse_plan_for_multiple_dates_uses_sales_day_specs() -> None:
+def test_parse_plan_for_multiple_dates_returns_multi_span_spec() -> None:
     parsed = parse_toy_query_plan_with_trace(
         "Give me total sales for March 1st 2025 and June 3rd 2025, and compare them.",
         intent_mode="deterministic",
     )
-    assert parsed.spec is None
-    assert len(parsed.plan) == 2
-    assert parsed.compare is True
-    assert [step.report_type for step in parsed.plan] == ["sales_day", "sales_day"]
-    assert [step.start_date for step in parsed.plan] == ["2025-03-01", "2025-06-03"]
-    assert [step.end_date for step in parsed.plan] == ["2025-03-01", "2025-06-03"]
+    assert parsed.spec is not None
+    assert parsed.plan == ()
+    assert parsed.compare is False
+    assert parsed.spec.report_type == "sales_day"
+    assert parsed.spec.compare is True
+    assert [span.start_date for span in parsed.spec.spans] == ["2025-03-01", "2025-06-03"]
 
 
 def test_validate_sales_for_dates_requires_dates_list() -> None:
@@ -152,3 +172,8 @@ def test_validate_sales_for_dates_requires_dates_list() -> None:
                 "format": "md",
             }
         )
+
+
+def test_parse_multi_span_error_lists_supported_patterns() -> None:
+    with pytest.raises(ValueError, match="Supported patterns"):
+        parse_toy_query("compare sales between March 2025 and sales", intent_mode="deterministic")

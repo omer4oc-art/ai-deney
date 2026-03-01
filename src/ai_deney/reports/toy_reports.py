@@ -136,6 +136,44 @@ def run_sales_day(
     }
 
 
+def _run_sales_totals_span(
+    start_date: str,
+    end_date: str,
+    db_path: Path,
+    *,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    start = date.fromisoformat(str(start_date)).isoformat()
+    end = date.fromisoformat(str(end_date)).isoformat()
+    if end < start:
+        raise ValueError("span end_date must be >= start_date")
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS reservations,
+                ROUND(COALESCE(SUM(total_paid), 0.0), 2) AS total_sales
+            FROM reservations
+            WHERE check_in >= ? AND check_in <= ?
+            """,
+            (start, end),
+        ).fetchone()
+    reservations = int((row["reservations"] if row is not None else 0) or 0)
+    total_sales = float((row["total_sales"] if row is not None else 0.0) or 0.0)
+    _append_query_trace(
+        query_trace,
+        name="sales_totals_for_span",
+        params={"start_date": start, "end_date": end},
+        row_count=1,
+    )
+    return {
+        "start": start,
+        "end": end,
+        "reservations": reservations,
+        "total_sales": round(total_sales, 2),
+    }
+
+
 def _run_sales_day_report(
     spec: QuerySpec,
     db_path: Path,
@@ -158,6 +196,102 @@ def _run_sales_day_report(
         "totals_by_date_count": 1,
         "columns": ["date", "reservations", "total_sales"],
         "rows": [row],
+        "warnings": [],
+    }
+
+
+def _run_sales_multi_span_report(
+    spec: QuerySpec,
+    db_path: Path,
+    *,
+    query_trace: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    spans = list(spec.spans)
+    if not spans:
+        raise ValueError("multi-span report requires spans")
+
+    rows: list[dict[str, object]] = []
+    for idx, span in enumerate(spans):
+        if span.end_date < span.start_date:
+            raise ValueError(f"span at index {idx} has end_date < start_date")
+        totals = _run_sales_totals_span(span.start_date, span.end_date, db_path, query_trace=query_trace)
+        rows.append(
+            {
+                "label": str(span.label),
+                "start": str(totals["start"]),
+                "end": str(totals["end"]),
+                "reservations": int(totals["reservations"]),
+                "total_sales": float(totals["total_sales"]),
+            }
+        )
+
+    analysis_lines: list[str] = []
+
+    total_sales_sum = round(sum(float(r["total_sales"]) for r in rows), 2)
+    reservation_count = sum(int(r["reservations"]) for r in rows)
+    notes = (
+        "Deterministic multi-span sales summary: SUM(total_paid) and reservation count are computed per span "
+        "from toy portal SQLite data."
+    )
+    if spec.redact_pii:
+        notes += " Redaction requested; output is aggregate-only and contains no guest-level rows."
+
+    deltas: dict[str, object] = {}
+    if spec.compare:
+        max_row = max(rows, key=lambda r: (float(r["total_sales"]), str(r["label"])))
+        min_row = min(rows, key=lambda r: (float(r["total_sales"]), str(r["label"])))
+        first = rows[0]
+        last = rows[-1]
+        delta_total_sales = round(float(last["total_sales"]) - float(first["total_sales"]), 2)
+        base_total_sales = float(first["total_sales"])
+        pct_change_total_sales = round((delta_total_sales / base_total_sales) * 100.0, 2) if base_total_sales != 0 else None
+        analysis_lines = [
+            (
+                "max_total_sales_span: "
+                f"{max_row['label']} ({max_row['start']}..{max_row['end']}) = {float(max_row['total_sales']):.2f}"
+            ),
+            (
+                "min_total_sales_span: "
+                f"{min_row['label']} ({min_row['start']}..{min_row['end']}) = {float(min_row['total_sales']):.2f}"
+            ),
+            (
+                "delta_total_sales(first_to_last): "
+                f"{last['label']} - {first['label']} = {delta_total_sales:.2f}"
+            ),
+        ]
+        if pct_change_total_sales is None:
+            analysis_lines.append("pct_change_total_sales(first_to_last): n/a (first span total_sales is 0.00)")
+        else:
+            analysis_lines.append(f"pct_change_total_sales(first_to_last): {pct_change_total_sales:.2f}%")
+        deltas = {
+            "first_label": str(first["label"]),
+            "last_label": str(last["label"]),
+            "delta_total_sales": delta_total_sales,
+            "pct_change_total_sales": pct_change_total_sales,
+            "max_span_label": str(max_row["label"]),
+            "max_span_total_sales": round(float(max_row["total_sales"]), 2),
+            "min_span_label": str(min_row["label"]),
+            "min_span_total_sales": round(float(min_row["total_sales"]), 2),
+        }
+        if pct_change_total_sales is None:
+            deltas["pct_change_note"] = "first span total_sales is 0.00"
+
+    return {
+        "title": f"Toy Portal Multi-Span Sales Report ({len(rows)} spans)",
+        "notes": notes,
+        "report_type": spec.report_type,
+        "start": str(rows[0]["start"]),
+        "end": str(rows[-1]["end"]),
+        "group_by": spec.group_by,
+        "compare": bool(spec.compare),
+        "spans_count": len(rows),
+        "reservation_count": reservation_count,
+        "total_sales": total_sales_sum,
+        "columns": ["label", "start", "end", "reservations", "total_sales"],
+        "rows": rows,
+        "totals": rows,
+        "deltas": deltas,
+        "analysis_lines": analysis_lines,
         "warnings": [],
     }
 
@@ -533,6 +667,8 @@ def run_query_spec(
     *,
     query_trace: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    if spec.spans:
+        return _run_sales_multi_span_report(spec, db_path, query_trace=query_trace)
     if spec.report_type in {"sales_range", "sales_month", "sales_by_channel"}:
         return _run_sales_report(spec, db_path, query_trace=query_trace)
     if spec.report_type == "sales_day":
@@ -549,13 +685,14 @@ def run_query_spec(
 
 
 def _render_markdown(report: dict[str, object]) -> str:
+    range_label = "outer_range" if report.get("spans_count") is not None else "date_range"
     lines = [
         f"# {report['title']}",
         "",
         str(report["notes"]),
         "",
         f"- report_type: {report['report_type']}",
-        f"- date_range: {report['start']}..{report['end']}",
+        f"- {range_label}: {report['start']}..{report['end']}",
     ]
 
     if report.get("group_by"):
@@ -568,6 +705,8 @@ def _render_markdown(report: dict[str, object]) -> str:
         lines.append(f"- reservation_count: {int(report['reservation_count'])}")
     if report.get("total_sales") is not None:
         lines.append(f"- total_sales: {_format_money(float(report['total_sales']))}")
+    if report.get("spans_count") is not None:
+        lines.append(f"- spans_count: {int(report['spans_count'])}")
     if report.get("date_count") is not None:
         lines.append(f"- date_count: {int(report['date_count'])}")
     if report.get("totals_by_date_count") is not None:
@@ -608,6 +747,7 @@ def _render_markdown(report: dict[str, object]) -> str:
 def _render_html(report: dict[str, object]) -> str:
     rows = list(report.get("rows") or [])
     columns = list(report.get("columns") or [])
+    range_label = "outer_range" if report.get("spans_count") is not None else "date_range"
     lines = [
         "<!doctype html>",
         "<html>",
@@ -626,7 +766,7 @@ def _render_html(report: dict[str, object]) -> str:
         f"<p>{escape(str(report['notes']))}</p>",
         "<ul>",
         f"<li>report_type: {escape(str(report['report_type']))}</li>",
-        f"<li>date_range: {escape(str(report['start']))}..{escape(str(report['end']))}</li>",
+        f"<li>{escape(range_label)}: {escape(str(report['start']))}..{escape(str(report['end']))}</li>",
     ]
 
     if report.get("group_by"):
@@ -639,6 +779,8 @@ def _render_html(report: dict[str, object]) -> str:
         lines.append(f"<li>reservation_count: {int(report['reservation_count'])}</li>")
     if report.get("total_sales") is not None:
         lines.append(f"<li>total_sales: {escape(_format_money(float(report['total_sales'])))}</li>")
+    if report.get("spans_count") is not None:
+        lines.append(f"<li>spans_count: {int(report['spans_count'])}</li>")
     if report.get("date_count") is not None:
         lines.append(f"<li>date_count: {int(report['date_count'])}</li>")
     if report.get("totals_by_date_count") is not None:
@@ -719,12 +861,17 @@ def answer_spec_with_metadata(
             "group_by": effective.group_by,
             "start": report_data["start"],
             "end": report_data["end"],
+            "outer_start": report_data["start"],
+            "outer_end": report_data["end"],
             "reservation_count": report_data.get("reservation_count"),
             "total_sales": report_data.get("total_sales"),
             "total_sales_sum": report_data.get("total_sales_sum"),
+            "spans_count": report_data.get("spans_count"),
+            "totals": list(report_data.get("totals") or []),
+            "deltas": dict(report_data.get("deltas") or {}),
             "date_count": report_data.get("date_count"),
             "totals_by_date_count": report_data.get("totals_by_date_count"),
-            "compare": bool(report_data.get("compare", False)),
+            "compare": bool(effective.compare),
             "warnings": list(report_data.get("warnings") or []),
             "occupancy_pct": report_data.get("occupancy_pct"),
         },
@@ -804,6 +951,8 @@ def answer_ask_from_plan(
         "group_by": None,
         "start": report_data["start"],
         "end": report_data["end"],
+        "outer_start": report_data["start"],
+        "outer_end": report_data["end"],
         "reservation_count": report_data.get("reservation_count"),
         "total_sales": report_data.get("total_sales"),
         "total_sales_sum": report_data.get("total_sales_sum"),
@@ -859,6 +1008,7 @@ def answer_ask(
         parsed_dates = [str(step.start_date or "") for step in parsed.plan]
         parsed_start = parsed_dates[0] if parsed_dates else None
         parsed_end = parsed_dates[-1] if parsed_dates else None
+        parsed_spans: list[dict[str, str]] = []
     else:
         if parsed.spec is None:
             raise ValueError("plan parser returned neither spec nor plan")
@@ -876,6 +1026,7 @@ def answer_ask(
         parsed_dates = list(parsed.spec.dates)
         parsed_start = parsed.spec.start_date
         parsed_end = parsed.spec.end_date
+        parsed_spans = [span.to_dict() for span in parsed.spec.spans]
 
     if include_trace:
         trace_queries = list(result.pop("_trace_queries", []) or [])
@@ -886,6 +1037,7 @@ def answer_ask(
                 "start_date": parsed_start,
                 "end_date": parsed_end,
                 "dates": parsed_dates,
+                "spans": parsed_spans,
             },
             "chosen": {
                 "report_type": chosen_report_type,

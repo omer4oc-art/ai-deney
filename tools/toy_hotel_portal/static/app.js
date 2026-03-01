@@ -325,6 +325,7 @@
 
   function renderAskMeta(spec, meta) {
     var askMeta = byId("ask-meta");
+    var askSpansCount = byId("ask-spans-count");
     if (!askMeta) {
       return;
     }
@@ -335,7 +336,17 @@
     var totalSales = meta && meta.total_sales != null ? String(Number(meta.total_sales).toFixed(2)) : "";
     var intentMode = meta && meta.intent_mode ? String(meta.intent_mode) : "";
     var executedCount = meta && meta.executed_count != null ? String(meta.executed_count) : "";
+    var spansCount = meta && meta.spans_count != null ? Number(meta.spans_count) : null;
     askMeta.textContent = "report_type=" + reportType + "  range=" + range + (totalSales ? "  total_sales=" + totalSales : "") + (executedCount ? "  executed_count=" + executedCount : "") + (intentMode ? "  intent_mode=" + intentMode : "");
+    if (askSpansCount) {
+      if (spansCount != null) {
+        askSpansCount.classList.remove("hidden");
+        askSpansCount.textContent = "Detected spans: " + String(spansCount);
+      } else {
+        askSpansCount.classList.add("hidden");
+        askSpansCount.textContent = "";
+      }
+    }
   }
 
   function renderAskWarnings(warnings) {
