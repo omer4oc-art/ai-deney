@@ -14,6 +14,7 @@ ReportType = Literal[
     "sales_range",
     "sales_month",
     "sales_by_channel",
+    "sales_for_dates",
     "occupancy_range",
     "reservations_list",
     "export_reservations",
@@ -58,6 +59,12 @@ _DATE_RANGE_RE = re.compile(
     r"\b(20\d{2}-\d{2}-\d{2})\b\s*(?:to|through|thru|until|-)\s*\b(20\d{2}-\d{2}-\d{2})\b",
     re.IGNORECASE,
 )
+_ISO_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+_MONTH_DAY_RE = re.compile(
+    rf"\b({_MONTH_NAMES_REGEX})\s+([0-3]?\d)(?:st|nd|rd|th)?(?:\s*,?\s*(?:\(?\s*(20\d{{2}})\s*\)?))?\b",
+    re.IGNORECASE,
+)
+_COMPARE_RE = re.compile(r"\b(compare|vs|versus|difference|delta)\b", re.IGNORECASE)
 
 _ALLOWED_KEYS = {
     "report_type",
@@ -66,6 +73,8 @@ _ALLOWED_KEYS = {
     "year",
     "month",
     "group_by",
+    "dates",
+    "compare",
     "redact_pii",
     "format",
 }
@@ -80,6 +89,8 @@ _RANGE_REQUIRED_REPORTS = {
 _EXAMPLES = [
     "sales by channel for March 2025",
     "sales from 2025-03-01 to 2025-03-31",
+    "total sales on 2025-03-01 and 2025-06-03",
+    "compare March 1 vs June 3",
     "occupancy for March 2025",
     "list reservations from 2025-03-01 to 2025-03-15",
     "export reservations for March 2025",
@@ -94,13 +105,17 @@ class QuerySpec:
     year: int | None = None
     month: int | None = None
     group_by: GroupBy | None = None
+    dates: tuple[str, ...] = ()
+    compare: bool = False
     redact_pii: bool = True
     format: FormatType = "md"
 
     def resolved_range(self) -> tuple[date, date]:
-        if self.start_date is None or self.end_date is None:
-            raise ValueError("query spec has no resolved start_date/end_date")
-        return _parse_date(self.start_date), _parse_date(self.end_date)
+        if self.start_date is not None and self.end_date is not None:
+            return _parse_date(self.start_date), _parse_date(self.end_date)
+        if self.report_type == "sales_for_dates" and self.dates:
+            return _parse_date(self.dates[0]), _parse_date(self.dates[-1])
+        raise ValueError("query spec has no resolved start_date/end_date")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -110,6 +125,8 @@ class QuerySpec:
             "year": self.year,
             "month": self.month,
             "group_by": self.group_by,
+            "dates": list(self.dates),
+            "compare": self.compare,
             "redact_pii": self.redact_pii,
             "format": self.format,
         }
@@ -123,6 +140,7 @@ class ToyParseResult:
     spec: QuerySpec
     raw_llm_json: dict[str, object] | None
     intent_mode: IntentMode
+    warnings: tuple[str, ...] = ()
 
 
 ToyLLMRouter = Callable[[str], Mapping[str, object] | str]
@@ -189,7 +207,55 @@ def _extract_format(lowered: str) -> FormatType:
     return "md"
 
 
-def _deterministic_candidate(text: str) -> dict[str, object]:
+def _extract_compare(lowered: str) -> bool:
+    return bool(_COMPARE_RE.search(lowered))
+
+
+def _extract_date_points(text: str) -> tuple[list[str], list[str]]:
+    warnings: list[str] = []
+    dates: set[str] = set()
+
+    for match in _ISO_DATE_RE.finditer(text):
+        iso = match.group(1)
+        parsed = _parse_date(iso)
+        dates.add(parsed.isoformat())
+
+    month_day_tokens: list[tuple[int, int, int | None]] = []
+    explicit_years: set[int] = set()
+    for match in _MONTH_DAY_RE.finditer(text):
+        token = str(match.group(1)).strip().lower()
+        month = _MONTH_TOKEN_TO_NUMBER.get(token)
+        if month is None:
+            continue
+        day = int(match.group(2))
+        year_val = int(match.group(3)) if match.group(3) else None
+        if year_val is not None:
+            explicit_years.add(year_val)
+        month_day_tokens.append((month, day, year_val))
+
+    inferred_year: int | None = next(iter(explicit_years)) if len(explicit_years) == 1 else None
+    used_default_year = False
+    for month, day, year_val in month_day_tokens:
+        year = year_val
+        if year is None:
+            if inferred_year is not None:
+                year = inferred_year
+            else:
+                year = 2025
+                used_default_year = True
+        try:
+            parsed = date(year, month, day)
+        except Exception as exc:
+            raise ValueError(f"invalid month/day date: {month:02d}-{day:02d} ({year})") from exc
+        dates.add(parsed.isoformat())
+
+    if used_default_year:
+        warnings.append("Year omitted for one or more month/day dates; defaulted to 2025.")
+
+    return sorted(dates), warnings
+
+
+def _deterministic_candidate(text: str) -> tuple[dict[str, object], list[str]]:
     cleaned = str(text or "").strip()
     if not cleaned:
         raise ValueError("query text cannot be empty")
@@ -198,6 +264,8 @@ def _deterministic_candidate(text: str) -> dict[str, object]:
     date_range_match = _DATE_RANGE_RE.search(cleaned)
     year, month = _extract_month_year(cleaned)
     group_by = _extract_group_by(lowered)
+    compare = _extract_compare(lowered)
+    date_points, warnings = _extract_date_points(cleaned)
 
     candidate: dict[str, object] = {
         "report_type": "sales_range",
@@ -206,6 +274,8 @@ def _deterministic_candidate(text: str) -> dict[str, object]:
         "year": year,
         "month": month,
         "group_by": group_by,
+        "dates": [],
+        "compare": compare,
         "redact_pii": _extract_redact(lowered),
         "format": _extract_format(lowered),
     }
@@ -218,34 +288,55 @@ def _deterministic_candidate(text: str) -> dict[str, object]:
         candidate["report_type"] = "occupancy_range"
         if candidate["group_by"] is None:
             candidate["group_by"] = "day"
-        return candidate
+        return candidate, warnings
 
     if "export" in lowered and "reservation" in lowered:
         candidate["report_type"] = "export_reservations"
-        return candidate
+        return candidate, warnings
 
     if ("list reservation" in lowered) or ("reservations list" in lowered) or lowered.startswith("reservations"):
         candidate["report_type"] = "reservations_list"
-        return candidate
+        return candidate, warnings
+
+    if compare and len(date_points) >= 2:
+        candidate["report_type"] = "sales_for_dates"
+        candidate["dates"] = date_points
+        candidate["compare"] = True
+        candidate["group_by"] = None
+        candidate["start_date"] = None
+        candidate["end_date"] = None
+        return candidate, warnings
 
     if "sales" in lowered:
         if "by channel" in lowered or "by source channel" in lowered or "channel breakdown" in lowered:
             candidate["report_type"] = "sales_by_channel"
             candidate["group_by"] = "channel"
-            return candidate
+            return candidate, warnings
+
         if date_range_match:
             candidate["report_type"] = "sales_range"
             if candidate["group_by"] is None:
                 candidate["group_by"] = "day"
-            return candidate
+            return candidate, warnings
+
+        if date_points and (len(date_points) >= 2 or " on " in f" {lowered}"):
+            candidate["report_type"] = "sales_for_dates"
+            candidate["dates"] = date_points
+            candidate["compare"] = compare
+            candidate["group_by"] = None
+            candidate["start_date"] = None
+            candidate["end_date"] = None
+            return candidate, warnings
+
         if year is not None and month is not None:
             candidate["report_type"] = "sales_month"
             if candidate["group_by"] is None:
                 candidate["group_by"] = "day"
-            return candidate
+            return candidate, warnings
+
         raise ValueError(
-            "Ambiguous sales question. Provide a date range (YYYY-MM-DD to YYYY-MM-DD) "
-            "or a month like March 2025."
+            "Ambiguous sales question. Provide a date range (YYYY-MM-DD to YYYY-MM-DD), "
+            "specific dates (for example March 1 and June 3), or a month like March 2025."
         )
 
     raise ValueError("Unsupported toy query. Try one of: " + "; ".join(f"'{s}'" for s in _EXAMPLES))
@@ -287,12 +378,13 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
         "sales_range",
         "sales_month",
         "sales_by_channel",
+        "sales_for_dates",
         "occupancy_range",
         "reservations_list",
         "export_reservations",
     }:
         raise ValueError(
-            "report_type must be one of sales_range, sales_month, sales_by_channel, "
+            "report_type must be one of sales_range, sales_month, sales_by_channel, sales_for_dates, "
             "occupancy_range, reservations_list, export_reservations"
         )
 
@@ -316,6 +408,25 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
         redact_pii = redact_raw
     else:
         raise ValueError("redact_pii must be a boolean")
+
+    compare_raw = raw.get("compare", False)
+    if isinstance(compare_raw, bool):
+        compare = compare_raw
+    else:
+        raise ValueError("compare must be a boolean")
+
+    dates_raw = raw.get("dates", [])
+    if dates_raw in (None, ""):
+        dates_raw = []
+    if not isinstance(dates_raw, (list, tuple)):
+        raise ValueError("dates must be a list of YYYY-MM-DD strings")
+    dates_list: list[str] = []
+    for item in dates_raw:
+        if not isinstance(item, str):
+            raise ValueError("dates must contain only YYYY-MM-DD strings")
+        parsed_date = _parse_date(item)
+        dates_list.append(parsed_date.isoformat())
+    dates_list = sorted(set(dates_list))
 
     start_raw = raw.get("start_date")
     end_raw = raw.get("end_date")
@@ -357,6 +468,16 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
             raise ValueError("date range end must be >= start")
         start_date = parsed_start.isoformat()
         end_date = parsed_end.isoformat()
+
+    if report_type == "sales_for_dates":
+        if not dates_list:
+            raise ValueError("sales_for_dates requires at least one date in dates[]")
+        if compare and len(dates_list) < 2:
+            raise ValueError("sales_for_dates compare=true requires at least 2 dates")
+        if group_by is not None:
+            raise ValueError("sales_for_dates does not support group_by")
+    elif dates_list:
+        raise ValueError("dates is only supported for report_type=sales_for_dates")
 
     if report_type == "sales_month":
         if year is None or month is None:
@@ -401,6 +522,8 @@ def validate_query_spec(spec: Mapping[str, object] | QuerySpec, *, question_text
         year=year,
         month=month,
         group_by=group_by,
+        dates=tuple(dates_list),
+        compare=compare,
         redact_pii=redact_pii,
         format=fmt,
     )
@@ -419,9 +542,9 @@ def parse_toy_query_with_trace(
     mode = resolve_intent_mode(intent_mode)
 
     if mode == "deterministic":
-        candidate = _deterministic_candidate(cleaned)
+        candidate, warnings = _deterministic_candidate(cleaned)
         spec = validate_query_spec(candidate, question_text=cleaned)
-        return ToyParseResult(spec=spec, raw_llm_json=None, intent_mode="deterministic")
+        return ToyParseResult(spec=spec, raw_llm_json=None, intent_mode="deterministic", warnings=tuple(warnings))
 
     router = llm_router or _default_llm_router
     try:
@@ -431,7 +554,7 @@ def parse_toy_query_with_trace(
 
     raw_llm_json = _coerce_router_output(raw)
     spec = validate_query_spec(raw_llm_json, question_text=cleaned)
-    return ToyParseResult(spec=spec, raw_llm_json=raw_llm_json, intent_mode="llm")
+    return ToyParseResult(spec=spec, raw_llm_json=raw_llm_json, intent_mode="llm", warnings=())
 
 
 def parse_toy_query(

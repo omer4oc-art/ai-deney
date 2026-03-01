@@ -336,6 +336,21 @@
     askMeta.textContent = "report_type=" + reportType + "  range=" + range + (totalSales ? "  total_sales=" + totalSales : "") + (intentMode ? "  intent_mode=" + intentMode : "");
   }
 
+  function renderAskWarnings(warnings) {
+    var askWarnings = byId("ask-warnings");
+    if (!askWarnings) {
+      return;
+    }
+    var list = Array.isArray(warnings) ? warnings.filter(function (w) { return !!w; }) : [];
+    if (!list.length) {
+      askWarnings.classList.add("hidden");
+      askWarnings.textContent = "";
+      return;
+    }
+    askWarnings.classList.remove("hidden");
+    askWarnings.textContent = "Warnings:\\n- " + list.join("\\n- ");
+  }
+
   async function refreshDashboard() {
     var startInput = byId("start-date");
     var endInput = byId("end-date");
@@ -398,10 +413,12 @@
       lastAskContentType = contentType;
       renderAskOutput(output, format, contentType);
       renderAskMeta(response.spec || {}, response.meta || {});
+      renderAskWarnings((response.meta || {}).warnings || []);
       setAskStatus("Done.");
     } catch (err) {
       lastAskOutput = "";
       renderAskMeta({}, {});
+      renderAskWarnings([]);
       renderAskOutput("Ask failed: " + err.message, "md", "text/markdown");
       setAskStatus("Error.");
       throw err;

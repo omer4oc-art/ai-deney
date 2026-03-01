@@ -107,3 +107,30 @@ def test_llm_mode_rejects_invalid_router_output() -> None:
                 "foo": "bar",
             },
         )
+
+
+def test_parse_sales_for_dates_month_name_and_ordinals() -> None:
+    spec = parse_toy_query("total sales on March 1st and June 3rd 2025", intent_mode="deterministic")
+    assert spec.report_type == "sales_for_dates"
+    assert list(spec.dates) == ["2025-03-01", "2025-06-03"]
+    assert spec.compare is False
+
+
+def test_parse_sales_for_dates_compare_and_default_year_warning() -> None:
+    parsed = parse_toy_query_with_trace("compare March 1 vs June 3", intent_mode="deterministic")
+    assert parsed.spec.report_type == "sales_for_dates"
+    assert list(parsed.spec.dates) == ["2025-03-01", "2025-06-03"]
+    assert parsed.spec.compare is True
+    assert any("defaulted to 2025" in w for w in parsed.warnings)
+
+
+def test_validate_sales_for_dates_requires_dates_list() -> None:
+    with pytest.raises(ValueError, match="sales_for_dates requires at least one date"):
+        validate_query_spec(
+            {
+                "report_type": "sales_for_dates",
+                "compare": False,
+                "redact_pii": True,
+                "format": "md",
+            }
+        )

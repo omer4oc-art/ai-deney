@@ -17,12 +17,14 @@ Stage B introduces an intent parser with two modes for toy portal questions.
 ## QuerySpec Schema
 
 `QuerySpec` fields:
-- `report_type`: one of `sales_range`, `sales_month`, `sales_by_channel`, `occupancy_range`, `reservations_list`, `export_reservations`
+- `report_type`: one of `sales_range`, `sales_month`, `sales_by_channel`, `sales_for_dates`, `occupancy_range`, `reservations_list`, `export_reservations`
 - `start_date`: optional `YYYY-MM-DD`
 - `end_date`: optional `YYYY-MM-DD`
 - `year`: optional integer (`2000..2100`)
 - `month`: optional integer (`1..12`)
 - `group_by`: optional `day` or `channel`
+- `dates`: optional list of `YYYY-MM-DD` for `sales_for_dates`
+- `compare`: boolean, optional (`true` enables delta/range comparisons)
 - `redact_pii`: boolean, default `true`
 - `format`: `md` or `html`, default `md`
 
@@ -76,6 +78,13 @@ The API returns deterministic report output with:
 - `meta` (execution metadata)
 - `output` (rendered markdown/html string)
 - `content_type` (`text/markdown` or `text/html`)
+
+New deterministic multi-date sales examples:
+- `total sales on March 1 and June 3 2025`
+- `compare March 1 vs June 3`
+- `sales on 2025-03-01 and 2025-06-03`
+
+If month/day is provided without year (for example `March 1 and June 3`), the parser defaults year to `2025` and returns a warning in `meta.warnings`.
 
 ## Call `/api/ask` Directly
 

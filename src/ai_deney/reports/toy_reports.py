@@ -13,13 +13,13 @@ from typing import Literal
 from ai_deney.intent.toy_intent import (
     QuerySpec,
     ToyLLMRouter,
-    parse_toy_query,
     resolve_intent_mode,
 )
 from tools.toy_hotel_portal.db import (
     ROOM_COUNT,
     default_db_path,
     export_rows_in_window,
+    get_sales_totals_for_dates,
     occupancy_days,
     occupancy_pct,
     reservations_in_window,
@@ -250,9 +250,59 @@ def _run_export_reservations_report(spec: QuerySpec, db_path: Path) -> dict[str,
     }
 
 
+def _run_sales_for_dates_report(spec: QuerySpec, db_path: Path) -> dict[str, object]:
+    dates = list(spec.dates)
+    if not dates:
+        raise ValueError("sales_for_dates requires at least one date")
+
+    rows = get_sales_totals_for_dates(db_path, dates)
+    total_sales_sum = round(sum(float(r["total_sales"]) for r in rows), 2)
+    start = str(rows[0]["date"])
+    end = str(rows[-1]["date"])
+    analysis_lines: list[str] = []
+
+    if spec.compare and len(rows) == 2:
+        first = rows[0]
+        second = rows[1]
+        delta = round(float(second["total_sales"]) - float(first["total_sales"]), 2)
+        base = float(first["total_sales"])
+        pct_delta = (delta / base * 100.0) if base != 0 else 0.0
+        analysis_lines.append(
+            f"delta_total_sales({second['date']} - {first['date']}): {delta:.2f}"
+        )
+        analysis_lines.append(f"pct_delta_total_sales: {pct_delta:.2f}%")
+    elif spec.compare and len(rows) > 2:
+        max_row = max(rows, key=lambda r: float(r["total_sales"]))
+        min_row = min(rows, key=lambda r: float(r["total_sales"]))
+        sales_range = round(float(max_row["total_sales"]) - float(min_row["total_sales"]), 2)
+        analysis_lines.append(f"max_total_sales_date: {max_row['date']} ({float(max_row['total_sales']):.2f})")
+        analysis_lines.append(f"min_total_sales_date: {min_row['date']} ({float(min_row['total_sales']):.2f})")
+        analysis_lines.append(f"total_sales_range: {sales_range:.2f}")
+
+    return {
+        "title": "Toy Portal Sales Totals by Date",
+        "notes": "Sales definition: SUM(total_paid) for reservations whose check_in date equals each listed date.",
+        "report_type": spec.report_type,
+        "start": start,
+        "end": end,
+        "group_by": None,
+        "compare": bool(spec.compare),
+        "date_count": len(dates),
+        "totals_by_date_count": len(rows),
+        "total_sales": total_sales_sum,
+        "total_sales_sum": total_sales_sum,
+        "analysis_lines": analysis_lines,
+        "columns": ["date", "reservations", "total_sales"],
+        "rows": rows,
+        "warnings": [],
+    }
+
+
 def run_query_spec(spec: QuerySpec, db_path: Path) -> dict[str, object]:
     if spec.report_type in {"sales_range", "sales_month", "sales_by_channel"}:
         return _run_sales_report(spec, db_path)
+    if spec.report_type == "sales_for_dates":
+        return _run_sales_for_dates_report(spec, db_path)
     if spec.report_type == "occupancy_range":
         return _run_occupancy_report(spec, db_path)
     if spec.report_type == "reservations_list":
@@ -282,6 +332,12 @@ def _render_markdown(report: dict[str, object]) -> str:
         lines.append(f"- reservation_count: {int(report['reservation_count'])}")
     if report.get("total_sales") is not None:
         lines.append(f"- total_sales: {_format_money(float(report['total_sales']))}")
+    if report.get("date_count") is not None:
+        lines.append(f"- date_count: {int(report['date_count'])}")
+    if report.get("totals_by_date_count") is not None:
+        lines.append(f"- totals_by_date_count: {int(report['totals_by_date_count'])}")
+    if report.get("compare") is not None:
+        lines.append(f"- compare: {bool(report['compare'])}")
     lines.append("")
 
     rows = list(report.get("rows") or [])
@@ -301,6 +357,11 @@ def _render_markdown(report: dict[str, object]) -> str:
         lines.append("")
     else:
         lines.append("_No rows_")
+        lines.append("")
+
+    for line in list(report.get("analysis_lines") or []):
+        lines.append(f"- {str(line)}")
+    if list(report.get("analysis_lines") or []):
         lines.append("")
 
     lines.append(f"Data freshness / source: {_SOURCE_FOOTER}")
@@ -342,6 +403,14 @@ def _render_html(report: dict[str, object]) -> str:
         lines.append(f"<li>reservation_count: {int(report['reservation_count'])}</li>")
     if report.get("total_sales") is not None:
         lines.append(f"<li>total_sales: {escape(_format_money(float(report['total_sales'])))}</li>")
+    if report.get("date_count") is not None:
+        lines.append(f"<li>date_count: {int(report['date_count'])}</li>")
+    if report.get("totals_by_date_count") is not None:
+        lines.append(f"<li>totals_by_date_count: {int(report['totals_by_date_count'])}</li>")
+    if report.get("compare") is not None:
+        lines.append(f"<li>compare: {escape(str(bool(report['compare'])))}</li>")
+    for line in list(report.get("analysis_lines") or []):
+        lines.append(f"<li>{escape(str(line))}</li>")
     lines.append("</ul>")
 
     if rows and columns:
@@ -414,6 +483,11 @@ def answer_spec_with_metadata(
             "end": report_data["end"],
             "reservation_count": report_data.get("reservation_count"),
             "total_sales": report_data.get("total_sales"),
+            "total_sales_sum": report_data.get("total_sales_sum"),
+            "date_count": report_data.get("date_count"),
+            "totals_by_date_count": report_data.get("totals_by_date_count"),
+            "compare": bool(report_data.get("compare", False)),
+            "warnings": list(report_data.get("warnings") or []),
             "occupancy_pct": report_data.get("occupancy_pct"),
         },
     }
@@ -426,11 +500,17 @@ def answer_ask_from_spec(
     redact_pii: bool = False,
     db_path: Path | None = None,
     intent_mode: str = "deterministic",
+    warnings: list[str] | None = None,
 ) -> dict[str, object]:
     output_format: OutputFormat = "markdown" if format == "md" else "html"
     result = answer_spec_with_metadata(spec, db_path=db_path, output_format=output_format, redact_pii=redact_pii)
     meta = dict(result["metadata"])
     meta["intent_mode"] = intent_mode
+    merged_warnings = list(meta.get("warnings") or [])
+    for item in list(warnings or []):
+        if item not in merged_warnings:
+            merged_warnings.append(item)
+    meta["warnings"] = merged_warnings
     content_type = "text/html" if format == "html" else "text/markdown"
     return {
         "spec": result["spec"],
@@ -450,13 +530,17 @@ def answer_ask(
     llm_router: ToyLLMRouter | None = None,
 ) -> dict[str, object]:
     mode = resolve_intent_mode(intent_mode)
-    spec = parse_toy_query(text, intent_mode=mode, llm_router=llm_router)
+    from ai_deney.intent.toy_intent import parse_toy_query_with_trace
+
+    parsed = parse_toy_query_with_trace(text, intent_mode=mode, llm_router=llm_router)
+    spec = parsed.spec
     return answer_ask_from_spec(
         spec,
         format=format,
         redact_pii=redact_pii,
         db_path=db_path,
         intent_mode=mode,
+        warnings=list(parsed.warnings),
     )
 
 

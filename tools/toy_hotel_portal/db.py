@@ -202,6 +202,45 @@ def occupancy_pct(days: list[dict[str, object]], room_count: int = ROOM_COUNT) -
     return round(avg * 100.0, 2)
 
 
+def get_sales_totals_for_dates(db_path: Path, dates: list[str]) -> list[dict[str, object]]:
+    init_db(db_path)
+    normalized = sorted(set(str(d) for d in dates if str(d).strip()))
+    if not normalized:
+        return []
+
+    placeholders = ",".join(["?"] * len(normalized))
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                check_in AS date,
+                COUNT(*) AS reservations,
+                ROUND(COALESCE(SUM(total_paid), 0.0), 2) AS total_sales
+            FROM reservations
+            WHERE check_in IN ({placeholders})
+            GROUP BY check_in
+            ORDER BY check_in ASC
+            """,
+            tuple(normalized),
+        ).fetchall()
+
+    by_date = {str(row["date"]): row for row in rows}
+    out: list[dict[str, object]] = []
+    for d in normalized:
+        row = by_date.get(d)
+        if row is None:
+            out.append({"date": d, "reservations": 0, "total_sales": 0.0})
+        else:
+            out.append(
+                {
+                    "date": d,
+                    "reservations": int(row["reservations"] or 0),
+                    "total_sales": float(row["total_sales"] or 0.0),
+                }
+            )
+    return out
+
+
 def to_csv(rows: list[dict[str, object]], *, redact_pii: bool) -> str:
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=EXPORT_HEADERS, lineterminator="\n")
@@ -214,4 +253,3 @@ def to_csv(rows: list[dict[str, object]], *, redact_pii: bool) -> str:
             out["guest_name"] = f"REDACTED_{digest}"
         writer.writerow(out)
     return buf.getvalue()
-
