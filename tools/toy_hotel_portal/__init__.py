@@ -1,0 +1,2 @@
+"""Toy hotel portal package."""
+
