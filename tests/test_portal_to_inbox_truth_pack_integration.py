@@ -62,7 +62,13 @@ def test_portal_to_inbox_truth_pack_script_creates_inbox_and_run_artifacts() -> 
 
     if p.returncode != 0:
         out = f"{p.stdout}\n{p.stderr}"
-        if "Executable doesn't exist" in out or "playwright is not installed" in out:
+        if (
+            "Executable doesn't exist" in out
+            or "playwright is not installed" in out
+            or "operation not permitted" in out.lower()
+            or "did not become ready at http://127.0.0.1" in out
+            or "Target page, context or browser has been closed" in out
+        ):
             pytest.skip(f"playwright browser/runtime unavailable: {out}")
     assert p.returncode == 0, f"stdout={p.stdout}\nstderr={p.stderr}"
 

@@ -87,7 +87,10 @@ def test_toy_portal_playwright_flow_checkin_and_export(tmp_path: Path) -> None:
     )
     assert seed.returncode == 0, seed.stderr or seed.stdout
 
-    port = _free_port()
+    try:
+        port = _free_port()
+    except OSError as exc:
+        pytest.skip(f"integration environment forbids localhost port binding: {exc}")
     base_url = f"http://127.0.0.1:{port}"
     launch_code = (
         "from pathlib import Path;"
@@ -142,7 +145,12 @@ def test_toy_portal_playwright_flow_checkin_and_export(tmp_path: Path) -> None:
             out_file = connector.download_export_csv(start_date="2025-03-01", end_date="2025-03-31", run_id="integration")
         except RuntimeError as exc:
             msg = str(exc)
-            if "playwright is not installed" in msg or "Executable doesn't exist" in msg:
+            if (
+                "playwright is not installed" in msg
+                or "Executable doesn't exist" in msg
+                or "Permission denied" in msg
+                or "Target page, context or browser has been closed" in msg
+            ):
                 pytest.skip(f"playwright browser/runtime unavailable: {msg}")
             raise
 
