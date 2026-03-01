@@ -93,6 +93,36 @@ The API returns deterministic report output with:
 - `output` (rendered markdown/html string)
 - `content_type` (`text/markdown` or `text/html`)
 
+## E2E UI Lane (Playwright)
+
+Run the full toy Ask Alice E2E rehearsal lane:
+
+```bash
+bash scripts/run_toy_e2e.sh
+```
+
+What it does:
+- Seeds deterministic toy data (`rows=3000`, `seed=42`, fixed date range, fixed hot-range params).
+- Runs integration tests (`pytest -q -m integration`) including Ask panel UI automation.
+- Writes failure screenshots for Ask E2E into `outputs/_e2e/`.
+
+What it proves:
+- UI wiring: Ask input/select/toggle/submit path works end-to-end.
+- Deterministic data: seeded totals for `2025-03-01` and `2025-06-03` are stable.
+- PII safety: Ask output remains aggregate-only and excludes guest names.
+- Multi-span parsing: one Ask request resolves two spans and returns compare output.
+
+Install dependencies (once per environment):
+
+```bash
+python3 -m pip install playwright
+python3 -m playwright install chromium
+```
+
+Notes:
+- Integration tests are opt-in (`pytest -q` excludes `@pytest.mark.integration` by default).
+- If Playwright package or Chromium runtime is missing, integration tests skip with a clear reason.
+
 New deterministic multi-date sales examples:
 - `total sales on March 1 and June 3 2025`
 - `compare March 1 vs June 3`
